@@ -327,13 +327,12 @@ class Scheduler:
     
     def start_task(self, task_id: str, worker_profile: str,
                    model_profile: Optional[str] = None) -> bool:
-        """Mark a task as running, with worker capability validation.
+        """Mark a task as running with P40 resource locking.
         
-        Uses atomic SQLite UPDATE to ensure only one task transitions from
-        claimed to running at a time. The exclusive resource check prevents
-        tasks with the same resource from starting, and the UPDATE with
-        WHERE state='claimed' ensures only one succeeds even if both pass
-        the resource check.
+        Uses a transaction to ensure the exclusive resource check and state
+        transition happen atomically. SQLite's UPDATE with WHERE state='claimed'
+        is atomic at the row level, so only one task can transition from
+        claimed to running at a time.
         
         Args:
             task_id: Task ID
@@ -347,63 +346,76 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Check task is claimed
-            cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            if not row or row["state"] != "claimed":
-                conn.close()
-                return False
-            
-            # Check worker capability if worker_profile provided
-            if worker_profile:
-                task_kind = row["kind"]
-                worker = self._worker_registry.get_worker(worker_profile)
-                if not worker:
-                    conn.close()
-                    return False
-                
-                if worker.status != WorkerStatus.AVAILABLE:
-                    self._emit_event(task_id, "worker_failed",
-                                   from_state=None, to_state=None,
-                                   details=f"worker={worker_profile} status={worker.status.value}")
-                    conn.close()
-                    return False
-                
-                # Check exclusive resource is not in use
-                if worker.exclusive_resource:
-                    conflicts = self._get_resource_conflicts(worker.exclusive_resource)
-                    if conflicts > 0:
-                        self._emit_event(task_id, "worker_failed",
-                                       from_state=None, to_state=None,
-                                       details=f"exclusive_resource={worker.exclusive_resource} already in_use")
-                        conn.close()
-                        return False
-                
-                # Check capability matches
-                if worker.capability:
-                    worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
-                    matched = any(
-                        cap in task_kind.lower() or task_kind.lower() in cap
-                        for cap in worker_caps
-                    )
-                    if not matched:
-                        self._emit_event(task_id, "worker_failed",
-                                       from_state=None, to_state=None,
-                                       details=f"capability={worker.capability} doesn't match task_kind={task_kind}")
-                        conn.close()
-                        return False
+            # Start transaction (deferred lock - will acquire when needed)
+            cursor.execute("BEGIN")
             
             try:
-                # Close any previous open attempt
-                self._close_current_attempt(task_id)
+                # Check task is claimed (within transaction)
+                cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
+                row = cursor.fetchone()
+                if not row or row["state"] != "claimed":
+                    conn.rollback()
+                    conn.close()
+                    return False
                 
-                # ATOMIC TRANSITION: This UPDATE only succeeds for ONE claimed task
+                # Check worker capability if worker_profile provided
+                if worker_profile:
+                    task_kind = row["kind"]
+                    worker = self._worker_registry.get_worker(worker_profile)
+                    if not worker:
+                        conn.rollback()
+                        conn.close()
+                        return False
+                    
+                    if worker.status != WorkerStatus.AVAILABLE:
+                        self._emit_event(task_id, "worker_failed",
+                                       from_state=None, to_state=None,
+                                       details=f"worker={worker_profile} status={worker.status.value}")
+                        conn.rollback()
+                        conn.close()
+                        return False
+                    
+                    # Check exclusive resource is not in use
+                    if worker.exclusive_resource:
+                        conflicts = self._get_resource_conflicts(worker.exclusive_resource)
+                        if conflicts > 0:
+                            self._emit_event(task_id, "worker_failed",
+                                           from_state=None, to_state=None,
+                                           details=f"exclusive_resource={worker.exclusive_resource} already in_use")
+                            conn.rollback()
+                            conn.close()
+                            return False
+                    
+                    # Check capability matches
+                    if worker.capability:
+                        worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
+                        matched = any(
+                            cap in task_kind.lower() or task_kind.lower() in cap
+                            for cap in worker_caps
+                        )
+                        if not matched:
+                            self._emit_event(task_id, "worker_failed",
+                                           from_state=None, to_state=None,
+                                           details=f"capability={worker.capability} doesn't match task_kind={task_kind}")
+                            conn.rollback()
+                            conn.close()
+                            return False
+                
+                # ATOMIC TRANSITION: close old attempt, update state, record new attempt
+                # All within the same transaction
+                cursor.execute("""
+                    UPDATE task_attempts SET end_at = ?
+                    WHERE task_id = ? AND end_at IS NULL
+                """, (datetime.now(timezone.utc).isoformat(), task_id))
+                
+                # This UPDATE is atomic: only ONE claimed task can succeed
                 cursor.execute("""
                     UPDATE tasks SET state = 'running', updated_at = ?
                     WHERE id = ? AND state = 'claimed'
                 """, (datetime.now(timezone.utc).isoformat(), task_id))
                 
                 if cursor.rowcount == 0:
+                    conn.rollback()
                     conn.close()
                     return False
                 
@@ -424,6 +436,7 @@ class Scheduler:
                 return True
                 
             except sqlite3.Error:
+                conn.rollback()
                 conn.close()
                 return False
                 

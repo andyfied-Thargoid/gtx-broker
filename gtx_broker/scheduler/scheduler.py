@@ -216,12 +216,11 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
-    def claim_task(self, task_id: str, worker_profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Atomically claim a task for processing with worker selection.
+    def claim_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Atomically claim a task for processing.
 
         Args:
             task_id: Task ID to claim
-            worker_profile: Optional specific worker to use; if None, uses select_worker()
 
         Returns:
             Task data with updated state if claimed, None if not available
@@ -333,14 +332,14 @@ class Scheduler:
                     return False
                 
                 # Check worker capability matches task kind
-                # Capabilities are comma-separated (e.g., "text,code")
-                # Use partial matching: "code" matches "text,code", "coding" matches "text,code"
+                # Capabilities are comma-separated (e.g., "text,code,coding")
+                # Use substring matching: "code" matches "code_task", "coding" matches "coding"
                 if worker.capability:
                     worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
-                    # Check if task_kind matches any capability (partial match)
-                    # e.g., "coding" matches "code", "vision" matches "vision"
                     matched = False
                     for cap in worker_caps:
+                        # Check if task_kind contains the capability or vice versa
+                        # This allows "code" to match "code_task" and "coding" to match "coding"
                         if cap in task_kind.lower() or task_kind.lower() in cap:
                             matched = True
                             break
@@ -477,7 +476,6 @@ class Scheduler:
             # Get pending vision task count for policy decision
             cursor.execute("SELECT COUNT(*) FROM tasks WHERE state = 'queued' AND mode = 'vision'")
             pending_vision = cursor.fetchone()[0]
-            conn.close()
 
             # Get current schedule window
             current_window = self._policy.get_current_window(pending_vision=pending_vision)
@@ -520,7 +518,7 @@ class Scheduler:
             conn.close()
 
             return [self._row_to_dict(row) for row in rows]
-        except sqlite3.OperationalError:
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
             return []
 
     def get_task_events(self, task_id: str, limit: int = 100) -> List[Dict[str, Any]]:

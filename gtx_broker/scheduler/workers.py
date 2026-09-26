@@ -300,7 +300,7 @@ DEFAULT_WORKERS = [
     WorkerProfile(
         profile="p40-coding",
         endpoint="127.0.0.1:11436/v1",
-        capability="text,code",
+        capability="text,code,coding",
         status=WorkerStatus.AVAILABLE,
         context_limit=262144,
         model_profile="p40-coding",

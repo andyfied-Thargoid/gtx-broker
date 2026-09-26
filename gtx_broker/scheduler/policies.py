@@ -124,7 +124,7 @@ class DailyDispatchPolicy:
         if task_mode == TaskMode.BATCH:
             # Batch can run after image window
             # Check if we're in image window with pending images
-            window = self.get_current_window()
+            window = self.get_current_window(pending_vision=pending_vision)
             if window == ScheduleWindow.IMAGE_WINDOW and pending_vision > 0:
                 return False
             return True
@@ -172,7 +172,7 @@ class DailyDispatchPolicy:
         Returns:
             True if batch tasks can be admitted
         """
-        window = self.get_current_window()
+        window = self.get_current_window(pending_vision=pending_vision)
 
         # After 06:00: no new batch tasks
         if window == ScheduleWindow.RESTRICTED:
@@ -199,7 +199,7 @@ class DailyDispatchPolicy:
             return f"Waiting for image window (starts at {self.policy.image_window_start_hour:02d}:00)"
 
         if task_mode == TaskMode.BATCH:
-            window = self.get_current_window()
+            window = self.get_current_window(pending_vision=pending_vision)
 
             if window == ScheduleWindow.RESTRICTED:
                 return f"No new batch tasks admitted after {self.policy.image_window_end_hour:02d}:00"
@@ -232,7 +232,7 @@ class DailyDispatchPolicy:
             return next_window - now
 
         if task_mode == TaskMode.BATCH:
-            window = self.get_current_window()
+            window = self.get_current_window(pending_vision=0)
 
             if window == ScheduleWindow.RESTRICTED:
                 # Wait until next day's image window

@@ -290,29 +290,64 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
+    def _get_resource_conflicts(self, exclusive_resource: str) -> int:
+        """Check if exclusive resource is already in use.
+        
+        Args:
+            exclusive_resource: Resource name (e.g., "p40")
+            
+        Returns:
+            Number of tasks currently using this resource
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Get worker profile for the resource
+            worker = self._worker_registry.get_worker_by_resource(exclusive_resource)
+            if not worker:
+                conn.close()
+                return 0
+            
+            # Count running tasks for workers sharing this resource
+            # (same exclusive_resource). Exclude retry_wait and other non-running states.
+            cursor.execute("""
+                SELECT COUNT(DISTINCT t.id) FROM tasks t
+                INNER JOIN task_attempts a ON t.id = a.task_id
+                INNER JOIN workers w ON a.worker_profile = w.profile
+                WHERE t.state = 'running'
+                AND w.exclusive_resource = ?
+            """, (exclusive_resource,))
+            
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except sqlite3.OperationalError:
+            return 0
+    
     def start_task(self, task_id: str, worker_profile: str,
                    model_profile: Optional[str] = None) -> bool:
         """Mark a task as running, with worker capability validation.
-
+        
         Args:
             task_id: Task ID
             worker_profile: Worker profile that will process the task
             model_profile: Model profile to use
-
+            
         Returns:
             True if successful
         """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-
+            
             # Check task is claimed
             cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row or row["state"] != "claimed":
                 conn.close()
                 return False
-
+            
             # Check worker capability if worker_profile provided
             if worker_profile:
                 # Get task kind from row
@@ -330,6 +365,16 @@ class Scheduler:
                                    details=f"worker={worker_profile} status={worker.status.value}")
                     conn.close()
                     return False
+                
+                # Check exclusive resource is not in use
+                if worker.exclusive_resource:
+                    conflicts = self._get_resource_conflicts(worker.exclusive_resource)
+                    if conflicts > 0:
+                        self._emit_event(task_id, "worker_failed",
+                                       from_state=None, to_state=None,
+                                       details=f"worker={worker_profile} exclusive_resource={worker.exclusive_resource} in_use_by={conflicts}tasks")
+                        conn.close()
+                        return False
                 
                 # Check worker capability matches task kind
                 # Capabilities are comma-separated (e.g., "text,code,coding")
@@ -474,7 +519,11 @@ class Scheduler:
             cursor = conn.cursor()
 
             # Get pending vision task count for policy decision
-            cursor.execute("SELECT COUNT(*) FROM tasks WHERE state = 'queued' AND mode = 'vision'")
+            # Count both queued AND running vision tasks (running = claimed)
+            cursor.execute("""
+                SELECT COUNT(*) FROM tasks 
+                WHERE (state = 'queued' OR state = 'claimed') AND mode = 'vision'
+            """)
             pending_vision = cursor.fetchone()[0]
 
             # Get current schedule window

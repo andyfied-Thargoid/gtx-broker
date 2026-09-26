@@ -215,6 +215,35 @@ class WorkerRegistry:
         del data["availability"]
         return WorkerProfile.from_dict(data)
 
+    def get_worker_by_resource(self, exclusive_resource: str) -> Optional[WorkerProfile]:
+        """Get a worker profile that uses the specified exclusive resource.
+
+        Args:
+            exclusive_resource: Resource name (e.g., "p40")
+
+        Returns:
+            WorkerProfile if found, None otherwise
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM workers WHERE exclusive_resource = ? LIMIT 1
+        """, (exclusive_resource,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        columns = ["profile", "endpoint", "capability", "availability",
+                   "exclusive_resource", "max_concurrent", "context_limit",
+                   "model_profile", "created_at", "updated_at"]
+        data = dict(zip(columns, row))
+        data["status"] = data["availability"]
+        del data["availability"]
+        return WorkerProfile.from_dict(data)
+
     def get_all_workers(self) -> List[WorkerProfile]:
         """Get all registered workers.
 
@@ -302,6 +331,7 @@ DEFAULT_WORKERS = [
         endpoint="127.0.0.1:11436/v1",
         capability="text,code,coding",
         status=WorkerStatus.AVAILABLE,
+        exclusive_resource="p40",  # Shared P40 GPU with p40-vision
         context_limit=262144,
         model_profile="p40-coding",
     ),
@@ -310,6 +340,7 @@ DEFAULT_WORKERS = [
         endpoint="127.0.0.1:11436/v1",
         capability="vision",
         status=WorkerStatus.AVAILABLE,
+        exclusive_resource="p40",  # Shared P40 GPU with p40-coding
         context_limit=65536,
         model_profile="p40-vision-qwen35",
     ),

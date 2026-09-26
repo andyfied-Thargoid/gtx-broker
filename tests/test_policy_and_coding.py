@@ -54,6 +54,9 @@ class TestCodingTaskStartup:
         start_success = scheduler.start_task(task_id_1, "p40-coding", "p40-coding-qwen35")
         assert start_success, "'code' should match 'coding'"
         
+        # Complete task_id_1 so it doesn't block subsequent tests
+        scheduler.complete_task(task_id_1, result={"ok": True}, error=None)
+        
         # Test "vision" in "computer_vision" (task in cap)
         task_id_2 = "vision-task-003"
         success = scheduler.add_task(task_id_2, "computer_vision", {}, "vision", 10, "key-3")

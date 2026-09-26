@@ -217,6 +217,9 @@ class TestRetryReviewCancel:
         result = scheduler.cancel_task(task_id_3)
         assert not result, "Cannot cancel running task"
         
+        # Complete task-cancel-003 so it doesn't block subsequent tests
+        scheduler.complete_task(task_id_3, result={"ok": True}, error=None)
+        
         # Cannot cancel succeeded
         task_id_4 = "task-cancel-004"
         scheduler.add_task(task_id_4, "vision", {}, "batch", 10, "key-cancel-004")

@@ -325,14 +325,29 @@ class Scheduler:
         except sqlite3.OperationalError:
             return 0
     
+    def _emit_event_in_transaction(self, cursor, task_id: str, event_type: str, from_state: Optional[str] = None,
+                                   to_state: Optional[str] = None, details: Optional[str] = None):
+        """Record event within the same transaction (avoids self-lock deadlock)."""
+        try:
+            cursor.execute("""
+                INSERT INTO task_events (task_id, event_type, from_state, to_state, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                task_id, event_type, from_state, to_state, details,
+                datetime.now(timezone.utc).isoformat(),
+            ))
+        except sqlite3.Error:
+            pass  # Event logging failures are non-fatal
+    
     def start_task(self, task_id: str, worker_profile: str,
                    model_profile: Optional[str] = None) -> bool:
-        """Mark a task as running with P40 resource locking.
+        """Mark a task as running with atomic P40 resource locking.
         
-        Uses a transaction to ensure the exclusive resource check and state
-        transition happen atomically. SQLite's UPDATE with WHERE state='claimed'
-        is atomic at the row level, so only one task can transition from
-        claimed to running at a time.
+        Uses BEGIN IMMEDIATE to acquire a reserved lock, then performs all
+        operations (resource check, state transition, event logging) within
+        the same transaction. This prevents the race condition where two
+        different tasks could both see 0 conflicts and both start on the
+        same P40 resource.
         
         Args:
             task_id: Task ID
@@ -342,106 +357,125 @@ class Scheduler:
         Returns:
             True if successful
         """
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Start transaction (deferred lock - will acquire when needed)
-            cursor.execute("BEGIN")
-            
+        import time
+        
+        # Retry on lock contention (max 3 attempts with exponential backoff)
+        for attempt in range(3):
             try:
-                # Check task is claimed (within transaction)
-                cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
-                row = cursor.fetchone()
-                if not row or row["state"] != "claimed":
-                    conn.rollback()
-                    conn.close()
-                    return False
+                conn = self._get_connection()
+                cursor = conn.cursor()
                 
-                # Check worker capability if worker_profile provided
-                if worker_profile:
-                    task_kind = row["kind"]
-                    worker = self._worker_registry.get_worker(worker_profile)
-                    if not worker:
+                # BEGIN IMMEDIATE acquires reserved lock, blocking other writers immediately
+                cursor.execute("BEGIN IMMEDIATE")
+                
+                try:
+                    # Check task is claimed (within transaction)
+                    cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
+                    row = cursor.fetchone()
+                    if not row or row["state"] != "claimed":
                         conn.rollback()
                         conn.close()
                         return False
                     
-                    if worker.status != WorkerStatus.AVAILABLE:
-                        self._emit_event(task_id, "worker_failed",
-                                       from_state=None, to_state=None,
-                                       details=f"worker={worker_profile} status={worker.status.value}")
+                    # Check worker capability if worker_profile provided
+                    if worker_profile:
+                        task_kind = row["kind"]
+                        worker = self._worker_registry.get_worker(worker_profile)
+                        if not worker:
+                            conn.rollback()
+                            conn.close()
+                            return False
+                        
+                        if worker.status != WorkerStatus.AVAILABLE:
+                            self._emit_event_in_transaction(cursor, task_id, "worker_failed",
+                                                           from_state=None, to_state=None,
+                                                           details=f"worker={worker_profile} status={worker.status.value}")
+                            conn.rollback()
+                            conn.close()
+                            return False
+                        
+                        # ATOMIC RESOURCE CHECK: count running tasks with same exclusive_resource
+                        # Using same cursor/connection as main transaction
+                        if worker.exclusive_resource:
+                            cursor.execute("""
+                                SELECT COUNT(*) FROM tasks t
+                                INNER JOIN task_attempts a ON t.id = a.task_id
+                                INNER JOIN workers w ON a.worker_profile = w.profile
+                                WHERE t.state = 'running'
+                                AND w.exclusive_resource = ?
+                            """, (worker.exclusive_resource,))
+                            conflicts = cursor.fetchone()[0]
+                            if conflicts > 0:
+                                self._emit_event_in_transaction(cursor, task_id, "worker_failed",
+                                                               from_state=None, to_state=None,
+                                                               details=f"exclusive_resource={worker.exclusive_resource} already in_use")
+                                conn.rollback()
+                                conn.close()
+                                return False
+                        
+                        # Check capability matches
+                        if worker.capability:
+                            worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
+                            matched = any(
+                                cap in task_kind.lower() or task_kind.lower() in cap
+                                for cap in worker_caps
+                            )
+                            if not matched:
+                                self._emit_event_in_transaction(cursor, task_id, "worker_failed",
+                                                               from_state=None, to_state=None,
+                                                               details=f"capability={worker.capability} doesn't match task_kind={task_kind}")
+                                conn.rollback()
+                                conn.close()
+                                return False
+                    
+                    # ATOMIC TRANSITION: close old attempt, update state, record new attempt
+                    cursor.execute("""
+                        UPDATE task_attempts SET end_at = ?
+                        WHERE task_id = ? AND end_at IS NULL
+                    """, (datetime.now(timezone.utc).isoformat(), task_id))
+                    
+                    cursor.execute("""
+                        UPDATE tasks SET state = 'running', updated_at = ?
+                        WHERE id = ? AND state = 'claimed'
+                    """, (datetime.now(timezone.utc).isoformat(), task_id))
+                    
+                    if cursor.rowcount == 0:
                         conn.rollback()
                         conn.close()
                         return False
                     
-                    # Check exclusive resource is not in use
-                    if worker.exclusive_resource:
-                        conflicts = self._get_resource_conflicts(worker.exclusive_resource)
-                        if conflicts > 0:
-                            self._emit_event(task_id, "worker_failed",
-                                           from_state=None, to_state=None,
-                                           details=f"exclusive_resource={worker.exclusive_resource} already in_use")
-                            conn.rollback()
-                            conn.close()
-                            return False
+                    cursor.execute("""
+                        INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        task_id, worker_profile, model_profile,
+                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(timezone.utc).isoformat(),
+                    ))
                     
-                    # Check capability matches
-                    if worker.capability:
-                        worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
-                        matched = any(
-                            cap in task_kind.lower() or task_kind.lower() in cap
-                            for cap in worker_caps
-                        )
-                        if not matched:
-                            self._emit_event(task_id, "worker_failed",
-                                           from_state=None, to_state=None,
-                                           details=f"capability={worker.capability} doesn't match task_kind={task_kind}")
-                            conn.rollback()
-                            conn.close()
-                            return False
-                
-                # ATOMIC TRANSITION: close old attempt, update state, record new attempt
-                # All within the same transaction
-                cursor.execute("""
-                    UPDATE task_attempts SET end_at = ?
-                    WHERE task_id = ? AND end_at IS NULL
-                """, (datetime.now(timezone.utc).isoformat(), task_id))
-                
-                # This UPDATE is atomic: only ONE claimed task can succeed
-                cursor.execute("""
-                    UPDATE tasks SET state = 'running', updated_at = ?
-                    WHERE id = ? AND state = 'claimed'
-                """, (datetime.now(timezone.utc).isoformat(), task_id))
-                
-                if cursor.rowcount == 0:
+                    # Emit event within same transaction (no self-lock!)
+                    self._emit_event_in_transaction(cursor, task_id, "task_started",
+                                                   from_state="claimed", to_state="running",
+                                                   details=f"worker={worker_profile}, model={model_profile}")
+                    
+                    conn.commit()
+                    conn.close()
+                    return True
+                    
+                except sqlite3.Error:
                     conn.rollback()
                     conn.close()
                     return False
-                
-                cursor.execute("""
-                    INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    task_id, worker_profile, model_profile,
-                    datetime.now(timezone.utc).isoformat(),
-                    datetime.now(timezone.utc).isoformat(),
-                ))
-                
-                self._emit_event(task_id, "task_started", from_state="claimed", to_state="running",
-                                details=f"worker={worker_profile}, model={model_profile}")
-                
-                conn.commit()
+                    
+            except sqlite3.OperationalError as e:
                 conn.close()
-                return True
-                
-            except sqlite3.Error:
-                conn.rollback()
-                conn.close()
+                # Lock contention - retry with exponential backoff
+                if "database is locked" in str(e) and attempt < 2:
+                    time.sleep(0.05 * (2 ** attempt))  # 50ms, 100ms, 200ms
+                    continue
                 return False
-                
-        except sqlite3.OperationalError:
-            return False
+        
+        return False
 
     def complete_task(self, task_id: str, result: Dict[str, Any] = None,
                       error: Optional[str] = None, failure_class: Optional[str] = None) -> bool:

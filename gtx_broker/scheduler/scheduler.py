@@ -329,9 +329,11 @@ class Scheduler:
                    model_profile: Optional[str] = None) -> bool:
         """Mark a task as running, with worker capability validation.
         
-        The UPDATE with WHERE state='claimed' is atomic at SQLite level.
-        Resource checking is done before the update; if another task starts
-        first, this UPDATE will affect 0 rows and we'll detect it.
+        Uses atomic SQLite UPDATE to ensure only one task transitions from
+        claimed to running at a time. The exclusive resource check prevents
+        tasks with the same resource from starting, and the UPDATE with
+        WHERE state='claimed' ensures only one succeeds even if both pass
+        the resource check.
         
         Args:
             task_id: Task ID
@@ -354,15 +356,12 @@ class Scheduler:
             
             # Check worker capability if worker_profile provided
             if worker_profile:
-                # Get task kind from row
                 task_kind = row["kind"]
-                
                 worker = self._worker_registry.get_worker(worker_profile)
                 if not worker:
                     conn.close()
                     return False
                 
-                # Check worker is available
                 if worker.status != WorkerStatus.AVAILABLE:
                     self._emit_event(task_id, "worker_failed",
                                    from_state=None, to_state=None,
@@ -376,26 +375,21 @@ class Scheduler:
                     if conflicts > 0:
                         self._emit_event(task_id, "worker_failed",
                                        from_state=None, to_state=None,
-                                       details=f"worker={worker_profile} exclusive_resource={worker.exclusive_resource} in_use")
+                                       details=f"exclusive_resource={worker.exclusive_resource} already in_use")
                         conn.close()
                         return False
                 
-                # Check worker capability matches task kind
-                # Capabilities are comma-separated (e.g., "text,code,coding")
-                # Use substring matching: "code" matches "code_task", "coding" matches "coding"
+                # Check capability matches
                 if worker.capability:
                     worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
-                    matched = False
-                    for cap in worker_caps:
-                        # Check if task_kind contains the capability or vice versa
-                        # This allows "code" to match "code_task" and "coding" to match "coding"
-                        if cap in task_kind.lower() or task_kind.lower() in cap:
-                            matched = True
-                            break
+                    matched = any(
+                        cap in task_kind.lower() or task_kind.lower() in cap
+                        for cap in worker_caps
+                    )
                     if not matched:
                         self._emit_event(task_id, "worker_failed",
                                        from_state=None, to_state=None,
-                                       details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
+                                       details=f"capability={worker.capability} doesn't match task_kind={task_kind}")
                         conn.close()
                         return False
             
@@ -403,18 +397,16 @@ class Scheduler:
                 # Close any previous open attempt
                 self._close_current_attempt(task_id)
                 
-                # Update task state (atomic: WHERE state='claimed' ensures only one succeeds)
+                # ATOMIC TRANSITION: This UPDATE only succeeds for ONE claimed task
                 cursor.execute("""
                     UPDATE tasks SET state = 'running', updated_at = ?
                     WHERE id = ? AND state = 'claimed'
                 """, (datetime.now(timezone.utc).isoformat(), task_id))
                 
-                # Check if update succeeded
                 if cursor.rowcount == 0:
                     conn.close()
                     return False
                 
-                # Record attempt
                 cursor.execute("""
                     INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
                     VALUES (?, ?, ?, ?, ?)
@@ -529,10 +521,10 @@ class Scheduler:
             cursor = conn.cursor()
 
             # Get pending vision task count for policy decision
-            # Count queued and claimed (running) vision tasks
+            # Count queued, claimed, and running vision tasks to determine if image queue is drained
             cursor.execute("""
                 SELECT COUNT(*) FROM tasks 
-                WHERE (state = 'queued' OR state = 'claimed') AND mode = 'vision'
+                WHERE state IN ('queued', 'claimed', 'running') AND mode = 'vision'
             """)
             pending_vision = cursor.fetchone()[0]
 

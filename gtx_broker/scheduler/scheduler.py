@@ -329,6 +329,10 @@ class Scheduler:
                    model_profile: Optional[str] = None) -> bool:
         """Mark a task as running, with worker capability validation.
         
+        The UPDATE with WHERE state='claimed' is atomic at SQLite level.
+        Resource checking is done before the update; if another task starts
+        first, this UPDATE will affect 0 rows and we'll detect it.
+        
         Args:
             task_id: Task ID
             worker_profile: Worker profile that will process the task
@@ -372,7 +376,7 @@ class Scheduler:
                     if conflicts > 0:
                         self._emit_event(task_id, "worker_failed",
                                        from_state=None, to_state=None,
-                                       details=f"worker={worker_profile} exclusive_resource={worker.exclusive_resource} in_use_by={conflicts}tasks")
+                                       details=f"worker={worker_profile} exclusive_resource={worker.exclusive_resource} in_use")
                         conn.close()
                         return False
                 
@@ -394,37 +398,43 @@ class Scheduler:
                                        details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
                         conn.close()
                         return False
-
+            
             try:
-                cursor.execute("""
-                UPDATE tasks SET state = 'running', updated_at = ?
-                WHERE id = ?
-                """, (datetime.now(timezone.utc).isoformat(), task_id))
-
-                # Close any previous open attempt before starting new one
+                # Close any previous open attempt
                 self._close_current_attempt(task_id)
-
+                
+                # Update task state (atomic: WHERE state='claimed' ensures only one succeeds)
+                cursor.execute("""
+                    UPDATE tasks SET state = 'running', updated_at = ?
+                    WHERE id = ? AND state = 'claimed'
+                """, (datetime.now(timezone.utc).isoformat(), task_id))
+                
+                # Check if update succeeded
+                if cursor.rowcount == 0:
+                    conn.close()
+                    return False
+                
                 # Record attempt
                 cursor.execute("""
-                INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
+                    VALUES (?, ?, ?, ?, ?)
                 """, (
                     task_id, worker_profile, model_profile,
                     datetime.now(timezone.utc).isoformat(),
                     datetime.now(timezone.utc).isoformat(),
                 ))
-
+                
                 self._emit_event(task_id, "task_started", from_state="claimed", to_state="running",
                                 details=f"worker={worker_profile}, model={model_profile}")
-
+                
                 conn.commit()
                 conn.close()
                 return True
-
+                
             except sqlite3.Error:
                 conn.close()
                 return False
-
+                
         except sqlite3.OperationalError:
             return False
 
@@ -519,7 +529,7 @@ class Scheduler:
             cursor = conn.cursor()
 
             # Get pending vision task count for policy decision
-            # Count both queued AND running vision tasks (running = claimed)
+            # Count queued and claimed (running) vision tasks
             cursor.execute("""
                 SELECT COUNT(*) FROM tasks 
                 WHERE (state = 'queued' OR state = 'claimed') AND mode = 'vision'

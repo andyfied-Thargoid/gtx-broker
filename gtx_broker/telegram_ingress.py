@@ -31,6 +31,21 @@ class TelegramImageIngress:
         self.storage = storage
         self.quality_gate = quality_gate or ImageQualityGate()
 
+    def _reject_staged_task(self, task_id: str | None, reason: str) -> None:
+        """Leave a durable audit record and cancel a task created before failure."""
+        if not task_id:
+            return
+        scheduler_task = self.scheduler.get_task(task_id)
+        if scheduler_task and scheduler_task.get("state") in {"queued", "claimed"}:
+            self.scheduler.cancel_task(task_id)
+        if not self.storage.reject_task(task_id, reason):
+            # The original exception is more useful to the caller than a second
+            # storage error, but make the orphan risk visible to operators.
+            import logging
+            logging.getLogger(__name__).error(
+                "Could not mark staged ingress task %s rejected", task_id
+            )
+
     def ingest(self, event: Mapping[str, Any]) -> IngressResult:
         source_value = event.get("source_path")
         if not source_value:
@@ -52,6 +67,7 @@ class TelegramImageIngress:
             return IngressResult(True, existing.get("state", "queued"), task_id,
                                  str(path) if path else None)
 
+        task_id = None
         try:
             task_id, _staged_metadata = self.storage.stage_input(
                 source_path,
@@ -63,17 +79,17 @@ class TelegramImageIngress:
             )
             staged_path = self.storage.input_path(task_id)
             if staged_path is None:
-                return IngressResult(False, "rejected", task_id=task_id,
-                                     error="staged image path is missing")
+                raise RuntimeError("staged image path is missing")
             quality = self.quality_gate.assess(staged_path)
-            self.storage.update_metadata(task_id, {
+            if not self.storage.update_metadata(task_id, {
                 "quality": quality.as_dict(),
                 "caption": event.get("caption"),
                 "media_group_id": event.get("media_group_id"),
                 "source_kind": event.get("kind"),
-            })
+            }):
+                raise RuntimeError("could not persist image quality metadata")
             if quality.status == "reject":
-                self.storage.reject_task(task_id, "; ".join(quality.reasons))
+                self._reject_staged_task(task_id, "; ".join(quality.reasons))
                 return IngressResult(False, "rejected", task_id, str(staged_path),
                                      quality.as_dict(), "; ".join(quality.reasons))
 
@@ -99,15 +115,21 @@ class TelegramImageIngress:
                 input_path=str(staged_path),
             )
             if not added:
-                self.storage.reject_task(task_id, "scheduler rejected duplicate task")
+                self._reject_staged_task(task_id, "scheduler rejected duplicate task")
                 return IngressResult(False, "rejected", task_id, str(staged_path),
                                      quality.as_dict(), "scheduler rejected task")
-            self.storage.update_metadata(task_id, {"status": "queued"})
+            if not self.storage.update_metadata(task_id, {"status": "queued"}):
+                raise RuntimeError("could not mark staged image queued")
             return IngressResult(
                 True, "queued", task_id, str(staged_path), quality.as_dict()
             )
         except (OSError, ValueError, RuntimeError) as exc:
-            return IngressResult(False, "rejected", task_id=task_id, error=str(exc))
+            self._reject_staged_task(task_id, str(exc))
+            staged_path = self.storage.input_path(task_id) if task_id else None
+            return IngressResult(
+                False, "rejected", task_id=task_id,
+                path=str(staged_path) if staged_path else None, error=str(exc)
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

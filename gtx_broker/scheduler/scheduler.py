@@ -603,6 +603,19 @@ class Scheduler:
         except sqlite3.OperationalError:
             return None
 
+    def get_next_task(self) -> Optional[Dict[str, Any]]:
+        """Get next task respecting policies and review priority.
+        
+        Uses get_pending_tasks() to respect policy schedule windows,
+        then returns the highest priority task (review-tagged tasks first).
+        
+        Returns:
+            Task dict with 'id', 'kind', 'payload', 'mode', 'priority' or None
+        """
+        # Get pending tasks respecting policy (up to limit=1)
+        tasks = self.get_pending_tasks(limit=1)
+        return tasks[0] if tasks else None
+
     def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending (queued) tasks, respecting policy schedule.
 

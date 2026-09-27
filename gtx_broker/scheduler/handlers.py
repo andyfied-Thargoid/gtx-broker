@@ -94,29 +94,36 @@ class VisionHandler(TaskHandler):
     def handler_type(self) -> str:
         return "vision"
 
-    def can_handle(self, task_payload: Dict[str, Any]) -> bool:
-        return task_payload.get("kind") == "vision"
+    def can_handle(self, task: Dict[str, Any]) -> bool:
+        """Check if this handler can process the task.
 
-    def execute(self, task_payload: Dict[str, Any],
-                metadata_path: str) -> tuple[HandlerResult, Optional[Dict[str, Any]], Optional[str]]:
+        Args:
+            task: Task dict from scheduler (has 'kind' key)
+
+        Returns:
+            True if handler can process this task
+        """
+        return task.get("kind") == "vision"
+
+    def execute(self, task: Dict[str, Any]) -> HandlerResult:
         """Execute vision task.
 
         Args:
-            task_payload: Task payload with input_path, caption, etc.
-            metadata_path: Path to task metadata
+            task: Task dict from scheduler (has 'kind', 'payload', 'input_path', etc.)
 
         Returns:
-            Tuple of (result, output, error)
+            HandlerResult indicating success, failure, retry, or worker_unavailable
         """
         # TODO: Implement vision processing
-        # 1. Load image from metadata_path/image.jpg
+        # 1. Load image from input_path
         # 2. Load approved projector and model profile
         # 3. Send to P40 vision endpoint (11436)
         # 4. Parse JSON response
         # 5. Validate output
         # 6. Return result
 
-        return HandlerResult.WORKER_UNAVAILABLE, None, "Vision handler not yet implemented"
+        # For now, return WORKER_UNAVAILABLE since model is not loaded
+        return HandlerResult.WORKER_UNAVAILABLE
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         """Validate vision output.
@@ -142,19 +149,25 @@ class CodingHandler(TaskHandler):
     def handler_type(self) -> str:
         return "coding"
 
-    def can_handle(self, task_payload: Dict[str, Any]) -> bool:
-        return task_payload.get("kind") == "coding"
+    def can_handle(self, task: Dict[str, Any]) -> bool:
+        """Check if this handler can process the task.
 
-    def execute(self, task_payload: Dict[str, Any],
-                metadata_path: str) -> tuple[HandlerResult, Optional[Dict[str, Any]], Optional[str]]:
+        Args:
+            task: Task dict from scheduler (has 'kind' key)
+
+        Returns:
+            True if handler can process this task
+        """
+        return task.get("kind") == "coding"
+
+    def execute(self, task: Dict[str, Any]) -> HandlerResult:
         """Execute coding task.
 
         Args:
-            task_payload: Task payload with goal, context, repo_path, etc.
-            metadata_path: Path to task metadata
+            task: Task dict from scheduler (has 'kind', 'payload', 'goal', etc.)
 
         Returns:
-            Tuple of (result, output, error)
+            HandlerResult indicating success, failure, retry, or worker_unavailable
         """
         # TODO: Implement coding execution
         # 1. Clone/fetch repository
@@ -164,7 +177,8 @@ class CodingHandler(TaskHandler):
         # 5. Run tests
         # 6. Return result
 
-        return HandlerResult.WORKER_UNAVAILABLE, None, "Coding handler not yet implemented"
+        # For now, return WORKER_UNAVAILABLE since model is not loaded
+        return HandlerResult.WORKER_UNAVAILABLE
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         """Validate coding output.
@@ -184,16 +198,32 @@ class CodingHandler(TaskHandler):
 HANDLERS = [VisionHandler(), CodingHandler()]
 
 
-def get_handler_for_task(task_payload: Dict[str, Any]) -> Optional[TaskHandler]:
+def initialize_handlers() -> Dict[str, TaskHandler]:
+    """Initialize all handlers.
+    
+    Returns:
+        Dict mapping task kind to handler instance
+    """
+    handlers = {}
+    for handler in HANDLERS:
+        handlers[handler.handler_type] = handler
+    return handlers
+
+
+def get_handler_for_task(task: Dict[str, Any]) -> Optional[TaskHandler]:
     """Find handler for a task.
-
+    
     Args:
-        task_payload: Task payload
-
+        task: Task dict from scheduler (has 'kind' key)
+    
     Returns:
         Matching TaskHandler or None
     """
+    task_kind = task.get("kind")
+    if not task_kind:
+        return None
+    
     for handler in HANDLERS:
-        if handler.can_handle(task_payload):
+        if handler.handler_type == task_kind:
             return handler
     return None

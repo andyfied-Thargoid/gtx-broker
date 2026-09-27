@@ -13,6 +13,8 @@ import logging
 import math
 import mimetypes
 import os
+import shlex
+import subprocess
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -313,6 +315,10 @@ class CodingHandler(TaskHandler):
     Processes coding tasks using P40 coding worker.
     """
 
+    def __init__(self, timeout: Optional[float] = None):
+        self.timeout = timeout or float(os.getenv("P40_CODING_TIMEOUT", "1800"))
+        self.last_result: Optional[Dict[str, Any]] = None
+
     @property
     def handler_type(self) -> str:
         return "coding"
@@ -337,16 +343,68 @@ class CodingHandler(TaskHandler):
         Returns:
             HandlerResult indicating success, failure, retry, or worker_unavailable
         """
-        # TODO: Implement coding execution
-        # 1. Clone/fetch repository
-        # 2. Load prompt and context
-        # 3. Send to P40 coding endpoint (11436)
-        # 4. Apply changes to repository
-        # 5. Run tests
-        # 6. Return result
+        self.last_result = None
+        payload = task.get("payload") or {}
+        worktree = payload.get("worktree_path") or payload.get("repository_path")
+        command = payload.get("executor_command") or os.getenv("P40_CODING_COMMAND")
+        if not worktree or not command:
+            return HandlerResult.WORKER_UNAVAILABLE
+        worktree_path = Path(str(worktree)).expanduser()
+        if not worktree_path.is_dir():
+            return HandlerResult.FAILED
+        argv = shlex.split(command) if isinstance(command, str) else list(command)
+        if not argv:
+            return HandlerResult.WORKER_UNAVAILABLE
+        instruction = payload.get("instruction") or payload.get("goal") or "Implement the task."
+        try:
+            before = self._git_status(worktree_path)
+            completed = subprocess.run(
+                argv, cwd=worktree_path, input=str(instruction), capture_output=True,
+                text=True, timeout=self.timeout, check=False,
+            )
+            tests_passed = True
+            test_output = ""
+            test_command = payload.get("test_command")
+            if completed.returncode == 0 and test_command:
+                test_argv = shlex.split(test_command) if isinstance(test_command, str) else list(test_command)
+                tested = subprocess.run(
+                    test_argv, cwd=worktree_path, capture_output=True, text=True,
+                    timeout=self.timeout, check=False,
+                )
+                tests_passed = tested.returncode == 0
+                test_output = (tested.stdout + tested.stderr)[-12000:]
+            after = self._git_status(worktree_path)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.last_result = {"error": str(exc), "status": "executor_error"}
+            return HandlerResult.RETRY
 
-        # For now, return WORKER_UNAVAILABLE since model is not loaded
-        return HandlerResult.WORKER_UNAVAILABLE
+        changed = sorted(set(after) - set(before))
+        self.last_result = {
+            "status": "success" if completed.returncode == 0 and tests_passed else "failed",
+            "exit_code": completed.returncode,
+            "changed_files": changed,
+            "stdout": completed.stdout[-12000:],
+            "stderr": completed.stderr[-12000:],
+            "tests_passed": tests_passed,
+            "test_output": test_output,
+        }
+        if completed.returncode != 0 or not tests_passed:
+            return HandlerResult.FAILED
+        if payload.get("require_commit", True) and self._git_status(worktree_path):
+            self.last_result["status"] = "failed_dirty_worktree"
+            return HandlerResult.FAILED
+        if not changed and not payload.get("allow_no_change", False):
+            self.last_result["status"] = "failed_no_change"
+            return HandlerResult.FAILED
+        return HandlerResult.SUCCESS
+
+    @staticmethod
+    def _git_status(worktree: Path) -> list[str]:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree, capture_output=True, text=True, check=True,
+        )
+        return [line for line in result.stdout.splitlines() if line.strip()]
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         """Validate coding output.
@@ -357,13 +415,83 @@ class CodingHandler(TaskHandler):
         Returns:
             Tuple of (is_valid, error_message)
         """
-        # TODO: Validate coding output
-        # Check: files changed, tests pass, no unintended modifications
+        if not isinstance(output, dict):
+            return False, "coding output must be an object"
+        return (True, None) if output.get("status") == "success" else (False, "coding task did not succeed")
+
+
+class ReviewHandler(TaskHandler):
+    """Read-only Air reviewer command boundary.
+
+    The reviewer receives a task manifest on stdin and must return JSON. Any
+    worktree mutation is treated as a failed review and is never silently
+    retained.
+    """
+
+    def __init__(self, timeout: Optional[float] = None):
+        self.timeout = timeout or float(os.getenv("AIR_REVIEW_TIMEOUT", "900"))
+        self.last_result: Optional[Dict[str, Any]] = None
+
+    @property
+    def handler_type(self) -> str:
+        return "review"
+
+    def can_handle(self, task: Dict[str, Any]) -> bool:
+        return task.get("kind") == "review" or bool(task.get("review_tag") or task.get("review_worker"))
+
+    def execute(self, task: Dict[str, Any]) -> HandlerResult:
+        self.last_result = None
+        payload = task.get("payload") or {}
+        worktree = payload.get("worktree_path") or payload.get("repository_path")
+        command = payload.get("review_command") or os.getenv("AIR_REVIEW_COMMAND")
+        if not worktree or not command:
+            return HandlerResult.WORKER_UNAVAILABLE
+        worktree_path = Path(str(worktree)).expanduser()
+        if not worktree_path.is_dir():
+            return HandlerResult.FAILED
+        argv = shlex.split(command) if isinstance(command, str) else list(command)
+        if not argv:
+            return HandlerResult.WORKER_UNAVAILABLE
+        try:
+            before = CodingHandler._git_status(worktree_path)
+            completed = subprocess.run(
+                argv, cwd=worktree_path, input=json.dumps(task), capture_output=True,
+                text=True, timeout=self.timeout, check=False,
+            )
+            after = CodingHandler._git_status(worktree_path)
+            if before != after:
+                return HandlerResult.FAILED
+            result = VisionHandler._parse_output(completed.stdout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Air reviewer failed: %s", exc)
+            return HandlerResult.RETRY
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.error("Air review output was invalid: %s", exc)
+            return HandlerResult.FAILED
+        if completed.returncode != 0:
+            return HandlerResult.FAILED
+        valid, error = self.validate_output(result)
+        if not valid:
+            logger.error("Air review output failed validation: %s", error)
+            return HandlerResult.FAILED
+        self.last_result = result
+        return HandlerResult.SUCCESS
+
+    def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        if not isinstance(output, dict):
+            return False, "review output must be an object"
+        if not isinstance(output.get("passed"), bool):
+            return False, "review output passed must be boolean"
+        if not isinstance(output.get("findings"), list):
+            return False, "review output findings must be an array"
+        for finding in output["findings"]:
+            if not isinstance(finding, dict) or not finding.get("id") or not finding.get("severity"):
+                return False, "each finding needs id and severity"
         return True, None
 
 
 # Handler factory
-HANDLERS = [VisionHandler(), CodingHandler()]
+HANDLERS = [VisionHandler(), CodingHandler(), ReviewHandler()]
 
 
 def initialize_handlers() -> Dict[str, TaskHandler]:
@@ -387,6 +515,8 @@ def get_handler_for_task(task: Dict[str, Any]) -> Optional[TaskHandler]:
     Returns:
         Matching TaskHandler or None
     """
+    if task.get("review_tag") or task.get("review_worker"):
+        return next(handler for handler in HANDLERS if handler.handler_type == "review")
     task_kind = task.get("kind")
     if not task_kind:
         return None

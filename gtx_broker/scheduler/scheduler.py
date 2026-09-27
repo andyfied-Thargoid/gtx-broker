@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Callable, List, Dict, Any
 import sqlite3
-import logging
 from pathlib import Path
 import sys
 
@@ -17,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from gtx_broker.scheduler.storage import StorageContract
 from gtx_broker.scheduler.workers import WorkerRegistry, WorkerStatus, initialize_workers
 from gtx_broker.scheduler.policies import DailyDispatchPolicy, TaskMode, get_dispatch_policy, ScheduleWindow
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -169,10 +166,7 @@ class Scheduler:
 
     def add_task(self, task_id: str, kind: str, payload: Dict[str, Any],
                  mode: str = "batch", priority: int = 0,
-                 idempotency_key: Optional[str] = None,
-                 review_tag: bool = False,
-                 schedule_type: str = "immediate",
-                 batch_epoch_id: Optional[str] = None) -> bool:
+                 idempotency_key: Optional[str] = None) -> bool:
         """Add a task to the scheduler.
 
         Args:
@@ -182,10 +176,7 @@ class Scheduler:
             mode: Task mode ("immediate", "batch", "vision", "maintenance")
             priority: Task priority (higher = more urgent)
             idempotency_key: Optional idempotency key to prevent duplicates
-            review_tag: If True, task needs Air Review after P40 completes
-            schedule_type: When to run (immediate, batch, nightly)
-            batch_epoch_id: Optional epoch ID for grouping tasks
-            
+
         Returns:
             True if added, False if duplicate
         """
@@ -202,19 +193,17 @@ class Scheduler:
 
             try:
                 cursor.execute("""
-                INSERT INTO tasks (id, kind, state, priority, mode, payload, idempotency_key, 
-                                   review_tag, schedule_type, batch_epoch_id, created_at, updated_at)
-                VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (id, kind, state, priority, mode, payload, idempotency_key, created_at, updated_at)
+                VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
                 """, (
                     task_id, kind, priority, mode,
                     self._json_dump(payload), idempotency_key,
-                    review_tag, schedule_type, batch_epoch_id,
                     datetime.now(timezone.utc).isoformat(),
                     datetime.now(timezone.utc).isoformat(),
                 ))
 
                 self._emit_event(task_id, "task_added", from_state=None, to_state="queued",
-                                details=f"kind={kind}, mode={mode}, priority={priority}, schedule={schedule_type}")
+                                details=f"kind={kind}, mode={mode}, priority={priority}")
 
                 conn.commit()
                 conn.close()
@@ -972,263 +961,4 @@ class Scheduler:
             return True
             
         except sqlite3.OperationalError:
-            return False
-    
-    def transition_running_to_succeeded(self, task_id: str, error: Optional[str] = None) -> bool:
-        """Transition running → succeeded, closing current attempt.
-        
-        Args:
-            task_id: Task ID
-            error: Unused (for API consistency)
-            
-        Returns:
-            True if transitioned
-        """
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                return False
-            
-            if row["state"] != "running":
-                conn.close()
-                return False
-            
-            # Close current attempt before transitioning
-            self._close_current_attempt(task_id)
-            
-            to_state = "succeeded"
-            cursor.execute("""
-                UPDATE tasks SET state = ?, updated_at = ?
-                WHERE id = ?
-            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
-            
-            if cursor.rowcount > 0:
-                self._emit_event(task_id, "task_succeeded",
-                               from_state="running", to_state=to_state)
-                conn.commit()
-                
-            conn.close()
-            return True
-            
-        except sqlite3.OperationalError:
-            return False
-    
-    def transition_running_to_failed_terminal(self, task_id: str, error: Optional[str] = None) -> bool:
-        """Transition running → failed_terminal, closing current attempt.
-        
-        Args:
-            task_id: Task ID
-            error: Optional error message
-            
-        Returns:
-            True if transitioned
-        """
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                return False
-            
-            if row["state"] != "running":
-                conn.close()
-                return False
-            
-            # Close current attempt before transitioning
-            self._close_current_attempt(task_id)
-            
-            to_state = "failed_terminal"
-            cursor.execute("""
-                UPDATE tasks SET state = ?, error = ?, updated_at = ?
-                WHERE id = ?
-            """, (to_state, error, datetime.now(timezone.utc).isoformat(), task_id))
-            
-            if cursor.rowcount > 0:
-                self._emit_event(task_id, "task_failed",
-                               from_state="running", to_state=to_state,
-                               details=f"error={error}")
-                conn.commit()
-                
-            conn.close()
-            return True
-            
-        except sqlite3.OperationalError:
-            return False
-    
-    def transition_running_to_retry_wait(self, task_id: str, error: Optional[str] = None,
-                                         retry_at: Optional[str] = None) -> bool:
-        """Transition running → retry_wait, closing current attempt.
-        
-        Args:
-            task_id: Task ID
-            error: Optional error message
-            retry_at: ISO timestamp when task can be retried
-            
-        Returns:
-            True if transitioned
-        """
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                return False
-            
-            if row["state"] != "running":
-                conn.close()
-                return False
-            
-            # Close current attempt before transitioning
-            self._close_current_attempt(task_id)
-            
-            to_state = "retry_wait"
-            retry_at_ts = retry_at or (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-            
-            cursor.execute("""
-                UPDATE tasks SET state = ?, error = ?, retry_at = ?, updated_at = ?
-                WHERE id = ?
-            """, (to_state, error, retry_at_ts, datetime.now(timezone.utc).isoformat(), task_id))
-            
-            if cursor.rowcount > 0:
-                self._emit_event(task_id, "task_retry",
-                               from_state="running", to_state=to_state,
-                               details=f"retry_at={retry_at_ts}")
-                conn.commit()
-                
-            conn.close()
-            return True
-            
-        except sqlite3.OperationalError:
-            return False
-    
-    def _is_nightly_window(self, hour: int) -> bool:
-        """Check if currently in nightly batch window (00:00-06:00)."""
-        return 0 <= hour < 6
-    
-    def _is_batch_window(self, hour: int) -> bool:
-        """Check if currently in batch window (06:00-18:00)."""
-        return 6 <= hour < 18
-    
-    def _is_immediate_window(self, hour: int) -> bool:
-        """Check if currently in immediate window (18:00-00:00)."""
-        return 18 <= hour < 24
-    
-    def get_next_task(self, mode: str = "batch") -> Optional[dict]:
-        """Get next queued task respecting schedule and tags."""
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Get current hour for schedule-based routing
-            now = datetime.now(timezone.utc)
-            hour = now.hour
-            
-            # Build query based on current schedule window
-            if self._is_nightly_window(hour):
-                # Nightly window (00:00-06:00): Priority review-tagged, then nightly
-                query = """
-                    SELECT id, kind, priority, payload, input_path, output_path,
-                           review_tag, schedule_type, batch_epoch_id
-                    FROM tasks
-                    WHERE state = 'queued'
-                      AND (schedule_type = 'nightly' OR review_tag = TRUE)
-                    ORDER BY 
-                      CASE WHEN review_tag = TRUE THEN 0 ELSE 1 END,
-                      priority DESC, 
-                      created_at ASC
-                    LIMIT 1
-                """
-            elif self._is_batch_window(hour):
-                # Batch window (06:00-18:00): Priority review-tagged, then batch
-                query = """
-                    SELECT id, kind, priority, payload, input_path, output_path,
-                           review_tag, schedule_type, batch_epoch_id
-                    FROM tasks
-                    WHERE state = 'queued'
-                      AND (schedule_type = 'batch' OR review_tag = TRUE)
-                    ORDER BY
-                      CASE WHEN review_tag = TRUE THEN 0 ELSE 1 END,
-                      priority DESC,
-                      created_at ASC
-                    LIMIT 1
-                """
-            else:
-                # Immediate window (18:00-00:00): Priority immediate, then batch
-                query = """
-                    SELECT id, kind, priority, payload, input_path, output_path,
-                           review_tag, schedule_type, batch_epoch_id
-                    FROM tasks
-                    WHERE state = 'queued'
-                      AND (schedule_type = 'immediate' OR schedule_type = 'batch')
-                    ORDER BY
-                      CASE WHEN schedule_type = 'immediate' THEN 0 ELSE 1 END,
-                      priority DESC,
-                      created_at ASC
-                    LIMIT 1
-                """
-            
-            cursor.execute(query)
-            row = cursor.fetchone()
-            
-            if row:
-                task = {
-                    "id": row["id"],
-                    "kind": row["kind"],
-                    "priority": row["priority"],
-                    "payload": self._json_load(row["payload"]),
-                    "input_path": row["input_path"],
-                    "output_path": row["output_path"],
-                    "review_tag": bool(row["review_tag"]),
-                    "schedule_type": row["schedule_type"],
-                    "batch_epoch_id": row["batch_epoch_id"],
-                }
-                conn.close()
-                return task
-            
-            conn.close()
-            return None
-            
-        except sqlite3.OperationalError as e:
-            logger.error(f"Failed to get next task: {e}")
-            return None
-    
-    async def set_state(self, task_id: str, to_state: str, 
-                       error: Optional[str] = None, 
-                       retry_at: Optional[datetime] = None) -> bool:
-        """Async wrapper for state transitions.
-        
-        Args:
-            task_id: Task ID
-            to_state: Target state
-            error: Optional error message
-            retry_at: Optional retry timestamp (for retry_wait state)
-            
-        Returns:
-            True if transitioned successfully
-        """
-        # Map to_state to transition method
-        transition_methods = {
-            "succeeded": self.transition_running_to_succeeded,
-            "failed_terminal": self.transition_running_to_failed_terminal,
-            "retry_wait": lambda tid, err, retry: self.transition_running_to_retry_wait(tid, err, retry),
-            "awaiting_review": self.transition_running_to_awaiting_review,
-        }
-        
-        if to_state == "retry_wait" and retry_at:
-            return transition_methods[to_state](task_id, error, retry_at.isoformat() if isinstance(retry_at, datetime) else retry_at)
-        elif to_state in transition_methods:
-            return transition_methods[to_state](task_id, error)
-        else:
-            logger.error(f"Unknown state transition to {to_state}")
             return False

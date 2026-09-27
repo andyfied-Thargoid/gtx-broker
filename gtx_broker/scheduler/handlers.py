@@ -95,35 +95,41 @@ class VisionHandler(TaskHandler):
         return "vision"
 
     def can_handle(self, task_payload: Dict[str, Any]) -> bool:
-        # Import here to avoid circular dependency
-        from .handlers_vision import VisionHandler as RealVisionHandler
-        return task_payload.get("kind") == "vision" or task_payload.get("handler_type") == "vision"
+        return task_payload.get("kind") == "vision"
 
     def execute(self, task_payload: Dict[str, Any],
                 metadata_path: str) -> tuple[HandlerResult, Optional[Dict[str, Any]], Optional[str]]:
-        """Delegate to real VisionHandler implementation."""
-        # Import here to avoid circular dependency
-        from .handlers_vision import VisionHandler as RealVisionHandler
-        
-        real_handler = RealVisionHandler()
-        try:
-            # Use get_event_loop to avoid nested loop issues
-            import asyncio
-            loop = asyncio.get_running_loop()
-            # Create a new thread and run the event loop there
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, real_handler.execute(task_payload, metadata_path))
-                result = future.result(timeout=120)
-            return result
-        except Exception as e:
-            return HandlerResult.FAILED, None, f"Vision handler error: {e}"
+        """Execute vision task.
+
+        Args:
+            task_payload: Task payload with input_path, caption, etc.
+            metadata_path: Path to task metadata
+
+        Returns:
+            Tuple of (result, output, error)
+        """
+        # TODO: Implement vision processing
+        # 1. Load image from metadata_path/image.jpg
+        # 2. Load approved projector and model profile
+        # 3. Send to P40 vision endpoint (11436)
+        # 4. Parse JSON response
+        # 5. Validate output
+        # 6. Return result
+
+        return HandlerResult.WORKER_UNAVAILABLE, None, "Vision handler not yet implemented"
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
-        """Delegate to real VisionHandler validation."""
-        from .handlers_vision import VisionHandler as RealVisionHandler
-        real_handler = RealVisionHandler()
-        return real_handler.validate_output(output)
+        """Validate vision output.
+
+        Args:
+            output: Vision extraction output
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # TODO: Validate vision output schema
+        # Check required fields: merchant, date, totals, line_items
+        return True, None
 
 
 class CodingHandler(TaskHandler):

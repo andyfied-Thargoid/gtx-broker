@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from gtx_broker.scheduler.storage import StorageContract
 from gtx_broker.scheduler.workers import WorkerRegistry, WorkerStatus, initialize_workers
 from gtx_broker.scheduler.policies import DailyDispatchPolicy, TaskMode, get_dispatch_policy, ScheduleWindow
+from gtx_broker.scheduler.migrations import MigrationRunner
 
 
 @dataclass
@@ -64,8 +65,13 @@ class Scheduler:
         self._storage = StorageContract(Path(self.config.db_path).parent.parent)
         self._worker_registry = WorkerRegistry(self.db_path)
 
-        # Initialize database schema
+        # Initialize database schema and run migrations
         self._init_db()
+        self._migrations = MigrationRunner(self.config.db_path)
+        if not self._migrations.run_all():
+            import logging
+            logging.getLogger(__name__).error("Failed to apply database migrations")
+            raise RuntimeError("Database migration failed")
 
         # Initialize default workers
         initialize_workers(self.db_path)
@@ -84,7 +90,7 @@ class Scheduler:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # Create tasks table with retry_at column
+        # Create tasks table with retry_at column and tagging fields
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -100,6 +106,9 @@ class Scheduler:
             retry_policy TEXT,
             retry_at TIMESTAMP,
             error TEXT,
+            review_tag TEXT,
+            schedule_type TEXT,
+            batch_epoch_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )

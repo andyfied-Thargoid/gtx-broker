@@ -24,6 +24,8 @@ The follow-on integration stage is included in the same branch:
 - receipt ingress defaults to durable human review, and
   `VisionReviewService` records approval or rejection before the scheduler
   reaches a terminal state;
+- an opt-in P40 model-profile boundary restores the configured default profile
+  in `finally`; it never targets the GTX worker;
 - `gtx-image-ingress --json-stdin` validates and atomically stages a Telegram
   image, records source metadata, applies the quality gate, and creates an
   idempotent nightly vision task;
@@ -44,7 +46,7 @@ touch the GTX service.
 
 Not implemented by this stage:
 
-- production model-profile switching;
+- configuring and live-qualifying the P40 model switch command;
 - a live Air reviewer runtime;
 - a configured production coding executor;
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes

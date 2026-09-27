@@ -14,6 +14,7 @@ from .handlers import (
 from .epoch_manager import EpochManager
 from .quality import ImageQualityGate, QualityAssessment
 from .review import VisionReviewService
+from .model_profiles import ModelProfileError, P40ModelProfileController
 
 __all__ = [
     # Core scheduler
@@ -33,6 +34,8 @@ __all__ = [
     "get_dispatch_policy",
     "EpochManager",
     "VisionReviewService",
+    "ModelProfileError",
+    "P40ModelProfileController",
     "ImageQualityGate",
     "QualityAssessment",
     # Handlers

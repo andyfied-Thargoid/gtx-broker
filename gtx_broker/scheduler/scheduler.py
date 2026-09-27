@@ -619,8 +619,9 @@ class Scheduler:
     def get_retry_wait_task(self) -> Optional[Dict[str, Any]]:
         """Get next retry_wait task that has passed its retry delay.
 
-        This is used by the daemon to retry tasks that were marked for retry
-        (e.g., RETRY, WORKER_UNAVAILABLE, P40 contention).
+        This is used by the daemon to find tasks ready for retry. The actual
+        scheduling policy (e.g., vision IMAGE_WINDOW) is applied when the task
+        is promoted to queued and selected via get_next_task().
 
         Returns:
             Task dict with 'id', 'kind', 'payload', 'mode', 'priority' or None
@@ -648,14 +649,6 @@ class Scheduler:
             task_kind = row["kind"]
             task_mode = row["mode"]
             task_priority = row["priority"]
-
-            # Check policy constraints for this task
-            if task_mode == "vision":
-                # Vision tasks must be during IMAGE_WINDOW (00:00-06:00 UTC)
-                current_hour = datetime.now(timezone.utc).hour
-                if not (0 <= current_hour < 6):
-                    conn.close()
-                    return None
 
             conn.close()
             return {

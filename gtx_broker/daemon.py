@@ -59,15 +59,25 @@ class SchedulerDaemon:
                 # Try to get a queued task first
                 task = self.scheduler.get_next_task()
                 
-                # If no queued task, try retry_wait tasks
+                # If no queued task, check for retry_wait tasks and promote them
                 if not task:
-                    task = self.scheduler.get_retry_wait_task()
-                
-                if task:
+                    retry_task = self.scheduler.get_retry_wait_task()
+                    if retry_task:
+                        # Promote retry_wait → queued using existing requeue_retry_wait()
+                        promoted = self.scheduler.requeue_retry_wait(retry_task['id'])
+                        if promoted:
+                            logger.debug(f"Promoted task {retry_task['id']} from retry_wait to queued")
+                            # Now get the promoted task
+                            task = self.scheduler.get_next_task()
+                        else:
+                            logger.debug(f"Failed to promote task {retry_task['id']}, skipping")
+                    else:
+                        logger.debug("No tasks available (queued or retry_wait), waiting...")
+                else:
                     logger.info(f"Processing task {task['id']} (kind={task['kind']})")
                     self._dispatch_task(task)
-                else:
-                    logger.debug("No tasks available (queued or retry_wait), waiting...")
+                    continue  # Skip the no-task check below
+                
             except Exception as e:
                 logger.exception(f"Error in daemon loop: {e}")
 

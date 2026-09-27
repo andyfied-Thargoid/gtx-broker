@@ -349,3 +349,67 @@ class TestDaemonRetryWaitSupport:
         # Verify daemon can pick it up
         retry_task = daemon.scheduler.get_retry_wait_task()
         assert retry_task is not None
+
+
+class TestDaemonRetryWaitEndToEnd:
+    """End-to-end tests for retry_wait task processing."""
+
+    def test_retry_wait_promoted_to_succeeded(self, daemon):
+        """Test that a retry_wait task is promoted to queued and then succeeds."""
+        # Add a task
+        success = daemon.scheduler.add_task(
+            task_id="TEST-RETRY-1",
+            kind="coding",
+            payload={"goal": "retry test"},
+            mode="immediate",
+            priority=10
+        )
+        assert success
+
+        # Simulate: task was claimed, started, then failed and marked for retry
+        task = daemon.scheduler.get_next_task()
+        claimed = daemon.scheduler.claim_task(task['id'])
+        assert claimed
+
+        start = daemon.scheduler.start_task(task['id'], worker_profile='p40-coding')
+        assert start
+
+        # Mark for retry (simulating WORKER_UNAVAILABLE or RETRY result)
+        retry = daemon.scheduler.transition_running_to_retry_wait(task['id'])
+        assert retry
+
+        # Verify task is in retry_wait state
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'retry_wait'
+
+        # Now simulate daemon picking up the retry task
+        # Daemon calls get_retry_wait_task(), then requeue_retry_wait(), then get_next_task()
+        retry_task = daemon.scheduler.get_retry_wait_task()
+        assert retry_task is not None
+
+        # Promote to queued
+        promoted = daemon.scheduler.requeue_retry_wait(retry_task['id'])
+        assert promoted
+
+        # Verify task is now queued
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'queued'
+
+        # Get the promoted task
+        new_task = daemon.scheduler.get_next_task()
+        assert new_task is not None
+        assert new_task['id'] == 'TEST-RETRY-1'
+
+        # Process the task successfully
+        with patch.object(daemon, '_get_worker_for_task', return_value='p40-coding'):
+            with patch('gtx_broker.daemon.get_handler_for_task') as mock_get_handler:
+                mock_handler = MagicMock()
+                mock_handler.execute.return_value = HandlerResult.SUCCESS
+                mock_get_handler.return_value = mock_handler
+
+                success = daemon._dispatch_task(new_task)
+                assert success
+
+        # Verify task succeeded
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'succeeded'

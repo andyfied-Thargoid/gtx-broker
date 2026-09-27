@@ -616,6 +616,59 @@ class Scheduler:
         tasks = self.get_pending_tasks(limit=1)
         return tasks[0] if tasks else None
 
+    def get_retry_wait_task(self) -> Optional[Dict[str, Any]]:
+        """Get next retry_wait task that has passed its retry delay.
+
+        This is used by the daemon to retry tasks that were marked for retry
+        (e.g., RETRY, WORKER_UNAVAILABLE, P40 contention).
+
+        Returns:
+            Task dict with 'id', 'kind', 'payload', 'mode', 'priority' or None
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Get earliest retry_wait task that has passed its retry delay
+            # Note: Use strftime to compare date/time only, ignoring microseconds
+            cursor.execute("""
+                SELECT id, kind, mode, priority FROM tasks 
+                WHERE state = 'retry_wait' 
+                AND (retry_at IS NULL OR strftime('%Y-%m-%d %H:%M:%S', retry_at) <= strftime('%Y-%m-%d %H:%M:%S', 'now', 'utc'))
+                ORDER BY priority DESC, id ASC
+                LIMIT 1
+            """)
+            
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return None
+
+            task_id = row["id"]
+            task_kind = row["kind"]
+            task_mode = row["mode"]
+            task_priority = row["priority"]
+
+            # Check policy constraints for this task
+            if task_mode == "vision":
+                # Vision tasks must be during IMAGE_WINDOW (00:00-06:00 UTC)
+                current_hour = datetime.now(timezone.utc).hour
+                if not (0 <= current_hour < 6):
+                    conn.close()
+                    return None
+
+            conn.close()
+            return {
+                "id": task_id,
+                "kind": task_kind,
+                "mode": task_mode,
+                "priority": task_priority,
+            }
+
+        except sqlite3.Error:
+            logger.exception(f"Error getting retry_wait task")
+            return False
+
     def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending (queued) tasks, respecting policy schedule.
 

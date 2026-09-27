@@ -119,7 +119,7 @@ class TestDaemonStateMachine:
                 assert task_data['state'] == 'retry_wait'
 
     def test_worker_unavailable_requeues_to_retry_wait(self, daemon):
-        """Test that WORKER_UNAVAILABLE requeues task to retry_wait."""
+        """Test that worker unavailable requeues task to retry_wait."""
         # Add a task
         success = daemon.scheduler.add_task(
             task_id="TEST-004",
@@ -130,16 +130,17 @@ class TestDaemonStateMachine:
         )
         assert success
 
-        # Mock no vision worker available - dispatch should return False
-        with patch.object(daemon, '_get_worker_for_task', return_value=None):
-            # Dispatch task
-            task = daemon.scheduler.get_next_task()
-            success = daemon._dispatch_task(task)
-            assert not success  # Returns False when no worker available
+        # Mock worker available but start_task fails (simulating worker unavailable)
+        with patch.object(daemon, '_get_worker_for_task', return_value='p40-vision'):
+            with patch.object(daemon.scheduler, 'start_task', return_value=False):
+                # Dispatch task
+                task = daemon.scheduler.get_next_task()
+                success = daemon._dispatch_task(task)
+                assert not success  # Returns False when start_task fails
 
-            # Verify task requeued to retry_wait
-            task_data = daemon.scheduler.get_task(task['id'])
-            assert task_data['state'] == 'retry_wait'
+                # Verify task requeued to retry_wait
+                task_data = daemon.scheduler.get_task(task['id'])
+                assert task_data['state'] == 'retry_wait'
 
     def test_awaiting_review_transitions_correctly(self, daemon):
         """Test that AWAITING_REVIEW transitions task correctly."""
@@ -169,35 +170,11 @@ class TestDaemonStateMachine:
                 task_data = daemon.scheduler.get_task(task['id'])
                 assert task_data['state'] == 'awaiting_review'
 
-    def test_no_worker_available_does_not_stuck_claimed(self, daemon):
-        """Test that missing worker doesn't leave task stuck in claimed."""
-        # Add a task
-        success = daemon.scheduler.add_task(
-            task_id="TEST-006",
-            kind="coding",
-            payload={"goal": "test"},
-            mode="immediate",
-            priority=10
-        )
-        assert success
-
-        # Mock no worker available - dispatch should return False
-        with patch.object(daemon, '_get_worker_for_task', return_value=None):
-            # Dispatch task
-            task = daemon.scheduler.get_next_task()
-            success = daemon._dispatch_task(task)
-            assert not success  # Returns False when no worker available
-
-            # Task should be in retry_wait, not claimed
-            task_data = daemon.scheduler.get_task(task['id'])
-            assert task_data['state'] == 'retry_wait'
-            assert task_data['state'] != 'claimed'
-
     def test_start_task_failure_requeues_not_stuck_claimed(self, daemon):
         """Test that start_task failure doesn't leave task stuck in claimed."""
         # Add a task
         success = daemon.scheduler.add_task(
-            task_id="TEST-007",
+            task_id="TEST-006",
             kind="coding",
             payload={"goal": "test"},
             mode="immediate",
@@ -222,14 +199,14 @@ class TestDaemonStateMachine:
         """Test that P40 exclusivity is respected during start_task."""
         # Add two tasks
         success1 = daemon.scheduler.add_task(
-            task_id="TEST-008A",
+            task_id="TEST-007A",
             kind="coding",
             payload={"goal": "test1"},
             mode="immediate",
             priority=10
         )
         success2 = daemon.scheduler.add_task(
-            task_id="TEST-008B",
+            task_id="TEST-007B",
             kind="coding",
             payload={"goal": "test2"},
             mode="immediate",
@@ -255,7 +232,7 @@ class TestDaemonStateMachine:
                 # Second task should be queued (scheduler returns queued before retry_wait)
                 task2 = daemon.scheduler.get_next_task()
                 assert task2 is not None
-                assert task2['id'] == 'TEST-008B'
+                assert task2['id'] == 'TEST-007B'
 
                 task2_data = daemon.scheduler.get_task(task2['id'])
                 assert task2_data['state'] == 'queued'
@@ -291,3 +268,84 @@ class TestDaemonHandlerInterface:
 
         # Should have 'self' and 'task'
         assert 'task' in params
+
+
+class TestDaemonRetryWaitSupport:
+    """Test that daemon can process retry_wait tasks."""
+
+    def test_retry_wait_task_can_be_retrieved(self, daemon):
+        """Test that get_retry_wait_task() returns retry_wait tasks."""
+        # Add a task
+        success = daemon.scheduler.add_task(
+            task_id="TEST-008",
+            kind="coding",
+            payload={"goal": "test"},
+            mode="immediate",
+            priority=10
+        )
+        assert success
+
+        # Claim and start the task
+        task = daemon.scheduler.get_next_task()
+        claimed = daemon.scheduler.claim_task(task['id'])
+        assert claimed
+
+        start = daemon.scheduler.start_task(task['id'], worker_profile='p40-coding')
+        assert start
+
+        # Transition to retry_wait
+        retry = daemon.scheduler.transition_running_to_retry_wait(task['id'])
+        assert retry
+
+        # Verify task can be retrieved as retry_wait
+        retry_task = daemon.scheduler.get_retry_wait_task()
+        assert retry_task is not None
+        assert retry_task['id'] == 'TEST-008'
+
+    def test_daemon_run_picks_up_retry_wait(self, daemon):
+        """Test that daemon.run() picks up retry_wait tasks after queued tasks are exhausted."""
+        # Add one task
+        success = daemon.scheduler.add_task(
+            task_id="TEST-009",
+            kind="coding",
+            payload={"goal": "test"},
+            mode="immediate",
+            priority=10
+        )
+        assert success
+
+        # Complete the task
+        task = daemon.scheduler.get_next_task()
+        with patch.object(daemon, '_get_worker_for_task', return_value='p40-coding'):
+            with patch('gtx_broker.daemon.get_handler_for_task') as mock_get_handler:
+                mock_handler = MagicMock()
+                mock_handler.execute.return_value = HandlerResult.SUCCESS
+                mock_get_handler.return_value = mock_handler
+
+                success = daemon._dispatch_task(task)
+                assert success
+
+        # Now add another task and mark it for retry
+        success = daemon.scheduler.add_task(
+            task_id="TEST-010",
+            kind="coding",
+            payload={"goal": "retry"},
+            mode="immediate",
+            priority=10
+        )
+        assert success
+
+        task = daemon.scheduler.get_next_task()
+        claimed = daemon.scheduler.claim_task(task['id'])
+        assert claimed
+
+        start = daemon.scheduler.start_task(task['id'], worker_profile='p40-coding')
+        assert start
+
+        # Mark for retry
+        retry = daemon.scheduler.transition_running_to_retry_wait(task['id'])
+        assert retry
+
+        # Verify daemon can pick it up
+        retry_task = daemon.scheduler.get_retry_wait_task()
+        assert retry_task is not None

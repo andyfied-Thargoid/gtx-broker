@@ -56,12 +56,18 @@ class SchedulerDaemon:
 
         while self._running:
             try:
+                # Try to get a queued task first
                 task = self.scheduler.get_next_task()
+                
+                # If no queued task, try retry_wait tasks
+                if not task:
+                    task = self.scheduler.get_retry_wait_task()
+                
                 if task:
                     logger.info(f"Processing task {task['id']} (kind={task['kind']})")
                     self._dispatch_task(task)
                 else:
-                    logger.debug("No tasks available, waiting...")
+                    logger.debug("No tasks available (queued or retry_wait), waiting...")
             except Exception as e:
                 logger.exception(f"Error in daemon loop: {e}")
 
@@ -79,20 +85,11 @@ class SchedulerDaemon:
         if task_kind == "coding":
             return "p40-coding"
 
-        # Vision tasks - check if vision model available
+        # Vision tasks - let start_task() handle worker validation
         if task_kind == "vision":
-            # Check if vision-capable worker is available
-            vision_worker = "p40-vision"
-            try:
-                status = WorkerRegistry.get_worker(vision_worker)
-                if status == WorkerStatus.ACTIVE:
-                    return vision_worker
-            except KeyError:
-                # Worker not registered
-                pass
-
-            # No vision worker available - return None to trigger retry
-            return None
+            # Just return the profile name; start_task() will validate
+            # against WorkerRegistry and check P40 availability
+            return "p40-vision"
 
         # Unknown kind
         return None

@@ -3,12 +3,11 @@
 import logging
 import signal
 import time
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
-from gtx_broker.scheduler.workers import WorkerStatus, WorkerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +29,7 @@ class SchedulerDaemon:
             config: Scheduler config
         """
         self.scheduler = Scheduler(config)
+        self.storage = self.scheduler._storage
         self._active_tasks: Dict[str, bool] = {}
         self._running = False
         self._setup_signals()
@@ -85,24 +85,41 @@ class SchedulerDaemon:
 
         logger.info("Daemon stopped")
 
-    def _get_worker_for_task(self, task_kind: str) -> Optional[str]:
-        """Get appropriate worker name for task kind.
+    def _get_worker_for_task(self, task_or_kind: Any) -> Optional[str]:
+        """Get an available worker for a task, including review routing.
 
         Returns:
             Worker name (profile) or None
         """
-        # P40 coding worker
-        if task_kind == "coding":
-            return "p40-coding"
+        task = task_or_kind if isinstance(task_or_kind, dict) else {"kind": task_or_kind}
+        return self.scheduler.select_worker_for_task(task)
 
-        # Vision tasks - let start_task() handle worker validation
-        if task_kind == "vision":
-            # Just return the profile name; start_task() will validate
-            # against WorkerRegistry and check P40 availability
-            return "p40-vision"
+    def _claim_staged_input(self, task: Dict[str, Any]) -> bool:
+        """Move an ingress file to processing before a worker can read it."""
+        input_path = task.get("input_path")
+        if not input_path:
+            return False
+        try:
+            Path(input_path).resolve().relative_to(self.storage.incoming_path.resolve())
+        except ValueError:
+            return False
+        metadata = self.storage.claim_for_processing(task["id"])
+        if metadata is None:
+            return False
+        processing_path = self.storage.input_path(task["id"])
+        if processing_path is None:
+            return False
+        task["input_path"] = str(processing_path)
+        payload = dict(task.get("payload") or {})
+        payload["image_path"] = str(processing_path)
+        task["payload"] = payload
+        return True
 
-        # Unknown kind
-        return None
+    def _requeue_staged_input(self, task_id: str) -> None:
+        self.storage.requeue_for_retry(task_id)
+
+    def _complete_staged_input(self, task_id: str, result: Optional[Dict[str, Any]] = None) -> None:
+        self.storage.complete_task(task_id, result=result)
 
     def _dispatch_task(self, task: Dict[str, Any]) -> bool:
         """Execute task with proper state machine flow.
@@ -132,11 +149,23 @@ class SchedulerDaemon:
 
         logger.info(f"Task {task_id} claimed")
 
-        # Step 2: Start the task (with P40 atomic locking)
+        # Step 2: Claim durable image storage before a worker can read it.
+        storage_claimed = self._claim_staged_input(task)
+        if task.get("input_path") and not storage_claimed:
+            try:
+                Path(task["input_path"]).resolve().relative_to(self.storage.incoming_path.resolve())
+                self.scheduler.requeue_claimed_to_retry_wait(task_id)
+                return False
+            except ValueError:
+                pass
+
+        # Step 3: Start the task (with P40 atomic locking)
         # Get worker for this task kind
-        worker_name = self._get_worker_for_task(task_kind)
+        worker_name = self._get_worker_for_task(task)
         if not worker_name:
             logger.error(f"No suitable worker found for task kind {task_kind}")
+            if storage_claimed:
+                self._requeue_staged_input(task_id)
             # Task cannot be processed - requeue to retry_wait
             self.scheduler.requeue_claimed_to_retry_wait(task_id)
             logger.info(f"Task {task_id} requeued to retry_wait - no worker available")
@@ -144,6 +173,8 @@ class SchedulerDaemon:
 
         # Start task with worker profile
         if not self.scheduler.start_task(task_id, worker_profile=worker_name):
+            if storage_claimed:
+                self._requeue_staged_input(task_id)
             logger.error(f"Failed to start task {task_id} - worker unavailable or resource conflict")
             # Task cannot be started - requeue to retry_wait
             self.scheduler.requeue_claimed_to_retry_wait(task_id)
@@ -162,6 +193,8 @@ class SchedulerDaemon:
                 logger.error(f"No handler found for task kind {task_kind}")
                 # No handler - permanently fail
                 self.scheduler.complete_task(task_id, error="No handler found for task kind")
+                if storage_claimed:
+                    self._complete_staged_input(task_id, {"error": "no handler"})
                 return False
 
             # Execute the handler (blocking call - runs on existing event loop)
@@ -170,33 +203,47 @@ class SchedulerDaemon:
             # Step 4: Transition to final state based on result
             if result == HandlerResult.SUCCESS:
                 # Task completed successfully
-                self.scheduler.complete_task(task_id)
+                handler_result = getattr(handler, "last_result", None)
+                result_payload = handler_result if isinstance(handler_result, dict) else None
+                self.scheduler.complete_task(task_id, result=result_payload)
+                if storage_claimed:
+                    self._complete_staged_input(task_id, result_payload)
                 logger.info(f"Task {task_id} completed successfully")
 
             elif result == HandlerResult.FAILED:
                 # Task failed
                 self.scheduler.complete_task(task_id, error="Handler execution failed")
+                if storage_claimed:
+                    self._complete_staged_input(task_id, {"error": "handler execution failed"})
                 logger.warning(f"Task {task_id} failed during handler execution")
 
             elif result == HandlerResult.RETRY:
                 # Task should retry later
                 self.scheduler.transition_running_to_retry_wait(task_id)
+                if storage_claimed:
+                    self._requeue_staged_input(task_id)
                 logger.info(f"Task {task_id} transitioned to retry_wait")
 
             elif result == HandlerResult.WORKER_UNAVAILABLE:
                 # Worker not available (e.g., model not loaded)
                 # Mark as retry_wait to retry later
                 self.scheduler.transition_running_to_retry_wait(task_id)
+                if storage_claimed:
+                    self._requeue_staged_input(task_id)
                 logger.info(f"Task {task_id} transitioned to retry_wait - worker unavailable")
 
             elif result == HandlerResult.AWAITING_REVIEW:
                 # Task needs review
                 self.scheduler.transition_running_to_awaiting_review(task_id)
+                if storage_claimed:
+                    self._complete_staged_input(task_id, {"status": "awaiting_review"})
                 logger.info(f"Task {task_id} marked for review")
 
             else:
                 # Unknown result - mark as failed
                 self.scheduler.complete_task(task_id, error=f"Unknown handler result: {result}")
+                if storage_claimed:
+                    self._complete_staged_input(task_id, {"error": f"unknown result: {result}"})
                 logger.error(f"Task {task_id} resulted in unknown state: {result}")
 
             return True
@@ -205,6 +252,8 @@ class SchedulerDaemon:
             # Unexpected error - mark as failed
             logger.exception(f"Unexpected error during task {task_id} execution: {e}")
             self.scheduler.complete_task(task_id, error=str(e))
+            if storage_claimed:
+                self._complete_staged_input(task_id, {"error": str(e)})
             return False
 
         finally:

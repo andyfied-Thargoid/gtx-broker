@@ -3,7 +3,16 @@ from .scheduler import Scheduler, SchedulerConfig
 from .storage import StorageContract
 from .workers import WorkerRegistry, WorkerProfile, WorkerStatus, initialize_workers
 from .policies import DailyDispatchPolicy, TaskMode, ScheduleWindow, get_dispatch_policy
-from .handlers import TaskHandler, HandlerResult, VisionHandler, CodingHandler, get_handler_for_task
+from .handlers import (
+    TaskHandler,
+    HandlerResult,
+    VisionHandler,
+    CodingHandler,
+    ReviewHandler,
+    get_handler_for_task,
+)
+from .epoch_manager import EpochManager
+from .quality import ImageQualityGate, QualityAssessment
 
 __all__ = [
     # Core scheduler
@@ -21,10 +30,14 @@ __all__ = [
     "TaskMode",
     "ScheduleWindow",
     "get_dispatch_policy",
+    "EpochManager",
+    "ImageQualityGate",
+    "QualityAssessment",
     # Handlers
     "TaskHandler",
     "HandlerResult",
     "VisionHandler",
     "CodingHandler",
+    "ReviewHandler",
     "get_handler_for_task",
 ]

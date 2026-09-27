@@ -51,6 +51,12 @@ class StorageContract:
                      self.processed_path, self.tmp_path, self.metadata_path]:
             path.mkdir(parents=True, exist_ok=True)
 
+    def _task_dir(self, root: Path, task_id: str) -> Path:
+        """Return a task directory while rejecting traversal-shaped IDs."""
+        if not task_id or Path(task_id).name != task_id or task_id in {".", ".."}:
+            raise ValueError("invalid task id")
+        return root / task_id
+
     def validate_input(self, file_path: Path) -> tuple[bool, str, Optional[Dict[str, Any]]]:
         """Validate an input file against storage contract.
 
@@ -228,8 +234,8 @@ class StorageContract:
         Returns:
             Task metadata if claimed, None if not found or already claimed
         """
-        incoming_task_dir = self.incoming_path / task_id
-        processing_task_dir = self.processing_path / task_id
+        incoming_task_dir = self._task_dir(self.incoming_path, task_id)
+        processing_task_dir = self._task_dir(self.processing_path, task_id)
 
         if not incoming_task_dir.exists():
             return None
@@ -272,7 +278,7 @@ class StorageContract:
         Returns:
             True if successful
         """
-        processing_task_dir = self.processing_path / task_id
+        processing_task_dir = self._task_dir(self.processing_path, task_id)
 
         if not processing_task_dir.exists():
             return False
@@ -319,13 +325,64 @@ class StorageContract:
             Task metadata if found, None otherwise
         """
         for base_dir in [self.incoming_path, self.processing_path, self.processed_path]:
-            task_dir = base_dir / task_id
+            task_dir = self._task_dir(base_dir, task_id)
             if task_dir.exists():
                 metadata_file = task_dir / "metadata.json"
                 if metadata_file.exists():
                     with open(metadata_file, "r") as f:
                         return json.load(f)
         return None
+
+    def update_metadata(self, task_id: str, updates: Dict[str, Any]) -> bool:
+        """Atomically update metadata for a staged task."""
+        for base_dir in [self.incoming_path, self.processing_path, self.processed_path]:
+            task_dir = self._task_dir(base_dir, task_id)
+            metadata_file = task_dir / "metadata.json"
+            if not metadata_file.exists():
+                continue
+            try:
+                metadata = json.loads(metadata_file.read_text())
+                metadata.update(updates)
+                metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+                temporary = metadata_file.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+                os.replace(temporary, metadata_file)
+                return True
+            except (OSError, json.JSONDecodeError):
+                return False
+        return False
+
+    def input_path(self, task_id: str) -> Optional[Path]:
+        """Return the staged image path for a task in any lifecycle state."""
+        for base_dir in [self.incoming_path, self.processing_path, self.processed_path]:
+            task_dir = self._task_dir(base_dir, task_id)
+            if not task_dir.is_dir():
+                continue
+            candidates = sorted(
+                path for path in task_dir.iterdir()
+                if path.is_file() and path.name != "metadata.json" and not path.is_symlink()
+            )
+            if candidates:
+                return candidates[0]
+        return None
+
+    def requeue_for_retry(self, task_id: str) -> bool:
+        """Move a claimed input back to incoming after a retryable attempt."""
+        processing = self._task_dir(self.processing_path, task_id)
+        incoming = self._task_dir(self.incoming_path, task_id)
+        if not processing.is_dir() or incoming.exists():
+            return False
+        import shutil
+        try:
+            shutil.move(str(processing), str(incoming))
+            self.update_metadata(task_id, {"status": "accepted", "retry_at": datetime.now(timezone.utc).isoformat()})
+            return True
+        except OSError:
+            return False
+
+    def reject_task(self, task_id: str, reason: str) -> bool:
+        """Keep an input for audit while preventing it from being processed."""
+        return self.update_metadata(task_id, {"status": "rejected", "rejection_reason": reason})
 
     def cleanup_old_tasks(self, days: int = 30) -> int:
         """Clean up tasks older than specified days.

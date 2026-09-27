@@ -3,20 +3,24 @@
 Replaces JSON-based scheduler with SQLite implementation matching the
 scheduler architecture specification.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Callable, List, Dict, Any
+from typing import Optional, List, Dict, Any
 import sqlite3
 from pathlib import Path
 import sys
+import logging
 
 # Add parent directory for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from gtx_broker.scheduler.storage import StorageContract
 from gtx_broker.scheduler.workers import WorkerRegistry, WorkerStatus, initialize_workers
-from gtx_broker.scheduler.policies import DailyDispatchPolicy, TaskMode, get_dispatch_policy, ScheduleWindow
+from gtx_broker.scheduler.policies import get_dispatch_policy, ScheduleWindow
 from gtx_broker.scheduler.migrations import MigrationRunner
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -146,7 +150,7 @@ class Scheduler:
             retry_policy TEXT,
             retry_at TIMESTAMP,
             error TEXT,
-            review_tag TEXT,
+            review_tag INTEGER,
             schedule_type TEXT,
             batch_epoch_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -214,21 +218,46 @@ class Scheduler:
         return to_state in allowed
 
     def add_task(self, task_id: str, kind: str, payload: Dict[str, Any],
-                 mode: str = "batch", priority: int = 0,
-                 idempotency_key: Optional[str] = None) -> bool:
+                 mode: Optional[str] = None, priority: int = 0,
+                 idempotency_key: Optional[str] = None, *,
+                 schedule_type: Optional[str] = None,
+                 review_tag: bool = False,
+                 review_worker: Optional[str] = None,
+                 batch_epoch_id: Optional[str] = None,
+                 input_path: Optional[str] = None,
+                 output_path: Optional[str] = None) -> bool:
         """Add a task to the scheduler.
 
         Args:
             task_id: Unique task identifier
             kind: Task kind (e.g., "vision", "coding")
             payload: Task payload dictionary
-            mode: Task mode ("immediate", "batch", "vision", "maintenance")
+            mode: Task mode ("immediate", "batch", "vision", "maintenance").
+                If omitted, vision tasks use ``vision`` and other tasks use
+                ``immediate``.
             priority: Task priority (higher = more urgent)
             idempotency_key: Optional idempotency key to prevent duplicates
 
         Returns:
             True if added, False if duplicate
         """
+        valid_modes = {"immediate", "batch", "vision", "maintenance"}
+        valid_schedules = {"immediate", "batch", "nightly"}
+        mode = mode or ("vision" if kind == "vision" else "immediate")
+        if mode not in valid_modes:
+            raise ValueError(f"unsupported task mode: {mode}")
+        if schedule_type is None:
+            if kind == "vision" or mode == "vision":
+                schedule_type = "nightly"
+            elif mode == "batch":
+                schedule_type = "batch"
+            else:
+                schedule_type = "immediate"
+        if schedule_type not in valid_schedules:
+            raise ValueError(f"unsupported schedule type: {schedule_type}")
+        if review_tag and review_worker is None:
+            review_worker = "air-review"
+
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -242,17 +271,26 @@ class Scheduler:
 
             try:
                 cursor.execute("""
-                INSERT INTO tasks (id, kind, state, priority, mode, payload, idempotency_key, created_at, updated_at)
-                VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (
+                    id, kind, state, priority, mode, payload, input_path,
+                    output_path, idempotency_key, review_tag, schedule_type,
+                    review_worker, batch_epoch_id, created_at, updated_at
+                )
+                VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     task_id, kind, priority, mode,
-                    self._json_dump(payload), idempotency_key,
+                    self._json_dump(payload), input_path, output_path,
+                    idempotency_key, int(review_tag), schedule_type,
+                    review_worker, batch_epoch_id,
                     datetime.now(timezone.utc).isoformat(),
                     datetime.now(timezone.utc).isoformat(),
                 ))
 
                 self._emit_event(task_id, "task_added", from_state=None, to_state="queued",
-                                details=f"kind={kind}, mode={mode}, priority={priority}")
+                                details=(
+                                    f"kind={kind}, mode={mode}, schedule={schedule_type}, "
+                                    f"priority={priority}, review_tag={int(review_tag)}"
+                                ))
 
                 conn.commit()
                 conn.close()
@@ -617,6 +655,31 @@ class Scheduler:
         tasks = self.get_pending_tasks(limit=1)
         return tasks[0] if tasks else None
 
+    def select_worker_for_task(self, task: Dict[str, Any]) -> Optional[str]:
+        """Select an available worker without crossing task boundaries.
+
+        Vision and coding are deliberately explicit P40 capabilities. Review
+        tasks use the configured review worker and do not silently fall back to
+        the P40 or GTX when that worker is unavailable.
+        """
+        if task.get("review_tag") or task.get("review_worker"):
+            profile = task.get("review_worker") or "air-review"
+        else:
+            profile = {
+                "vision": "p40-vision",
+                "coding": "p40-coding",
+            }.get(task.get("kind"))
+            if profile is None:
+                profile = "gtx-chat" if task.get("kind") in {
+                    "query", "conversation", "general"
+                } else None
+        if profile is None:
+            return None
+        worker = self._worker_registry.get_worker(profile)
+        if worker is None or worker.status != WorkerStatus.AVAILABLE:
+            return None
+        return worker.profile
+
     def get_retry_wait_task(self) -> Optional[Dict[str, Any]]:
         """Get next retry_wait task that has passed its retry delay.
 
@@ -660,7 +723,7 @@ class Scheduler:
             }
 
         except sqlite3.Error:
-            logger.exception(f"Error getting retry_wait task")
+            logger.exception("Error getting retry_wait task")
             return False
 
     def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -678,8 +741,9 @@ class Scheduler:
             # Get pending vision task count for policy decision
             # Count queued, claimed, and running vision tasks to determine if image queue is drained
             cursor.execute("""
-                SELECT COUNT(*) FROM tasks 
-                WHERE state IN ('queued', 'claimed', 'running') AND mode = 'vision'
+                SELECT COUNT(*) FROM tasks
+                WHERE state IN ('queued', 'claimed', 'running')
+                  AND (mode = 'vision' OR kind = 'vision')
             """)
             pending_vision = cursor.fetchone()[0]
 
@@ -695,9 +759,13 @@ class Scheduler:
                 # Image window: vision + immediate
                 cursor.execute("""
                 SELECT * FROM tasks
-                WHERE state = 'queued' AND mode IN ('vision', 'immediate')
-                ORDER BY 
-                    CASE mode WHEN 'immediate' THEN 0 ELSE 1 END,
+                WHERE state = 'queued'
+                  AND (mode IN ('vision', 'immediate')
+                       OR schedule_type = 'immediate')
+                ORDER BY
+                    CASE WHEN mode = 'immediate' THEN 0 ELSE 1 END,
+                    CASE WHEN kind IN ('coding', 'vision')
+                              AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
                     priority DESC, created_at ASC
                 LIMIT ?
                 """, (limit,))
@@ -705,9 +773,13 @@ class Scheduler:
                 # Batch window: batch + immediate
                 cursor.execute("""
                 SELECT * FROM tasks
-                WHERE state = 'queued' AND mode IN ('batch', 'immediate')
-                ORDER BY 
-                    CASE mode WHEN 'immediate' THEN 0 ELSE 1 END,
+                WHERE state = 'queued'
+                  AND (mode IN ('batch', 'immediate')
+                       OR schedule_type IN ('batch', 'immediate'))
+                ORDER BY
+                    CASE WHEN kind IN ('coding', 'vision')
+                              AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
+                    CASE WHEN mode = 'immediate' THEN 0 ELSE 1 END,
                     priority DESC, created_at ASC
                 LIMIT ?
                 """, (limit,))
@@ -715,8 +787,12 @@ class Scheduler:
                 # RESTRICTED: only immediate tasks
                 cursor.execute("""
                 SELECT * FROM tasks
-                WHERE state = 'queued' AND mode = 'immediate'
-                ORDER BY priority DESC, created_at ASC
+                WHERE state = 'queued'
+                  AND (mode = 'immediate' OR schedule_type = 'immediate')
+                ORDER BY
+                    CASE WHEN kind IN ('coding', 'vision')
+                              AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
+                    priority DESC, created_at ASC
                 LIMIT ?
                 """, (limit,))
 
@@ -782,6 +858,10 @@ class Scheduler:
         """Convert database row to dictionary."""
         result = dict(row)
         result["payload"] = self._json_load(result.get("payload"))
+        if "review_tag" in result:
+            result["review_tag"] = str(result["review_tag"]).lower() in {
+                "1", "true", "yes"
+            }
         return result
 
     def _json_dump(self, data: Any) -> str:
@@ -1059,7 +1139,7 @@ class Scheduler:
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_completed",
                                from_state="awaiting_review", to_state=to_state,
-                               details=f"result=failure")
+                               details="result=failure")
                 conn.commit()
                 
             conn.close()

@@ -6,6 +6,9 @@ import tempfile
 import sys
 from pathlib import Path
 
+# Derive repository root from this test file's location
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 class TestPackageData:
     """Tests that package data (SQL migrations) is included in wheels."""
@@ -21,10 +24,10 @@ class TestPackageData:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             
-            # Build wheel
+            # Build wheel from repository root
             result = subprocess.run(
                 ["python3", "-m", "build", "--wheel", "--outdir", str(tmpdir)],
-                cwd="/home/andyfied/src/gtx-broker",
+                cwd=REPO_ROOT,
                 capture_output=True,
                 text=True
             )
@@ -61,7 +64,7 @@ class TestPackageData:
             # Build wheel
             subprocess.run(
                 ["python3", "-m", "build", "--wheel", "--outdir", str(tmpdir)],
-                cwd="/home/andyfied/src/gtx-broker",
+                cwd=REPO_ROOT,
                 capture_output=True,
                 check=True
             )
@@ -84,9 +87,9 @@ class TestPackageData:
             else:
                 pip_path = test_dir / "bin" / "pip"
             
-            # Install the wheel
+            # Install the wheel (no deps since we're testing package contents)
             result = subprocess.run(
-                [str(pip_path), "install", "--quiet", str(wheels[0])],
+                [str(pip_path), "install", "--quiet", "--no-deps", str(wheels[0])],
                 capture_output=True,
                 text=True
             )

@@ -1,6 +1,7 @@
 """Scheduler daemon: dispatch tasks to handlers with proper state machine flow."""
 
 import logging
+import os
 import signal
 import time
 from pathlib import Path
@@ -30,11 +31,70 @@ class SchedulerDaemon:
         """
         self.scheduler = Scheduler(config)
         self.storage = self.scheduler._storage
+        self.retention_days = self._configured_retention_days()
         self._active_tasks: Dict[str, bool] = {}
         self._running = False
         self._setup_signals()
+        self._recover_interrupted_tasks()
+        self._run_retention_cleanup()
+        self._last_retention_cleanup = time.monotonic()
 
         logger.info("Scheduler daemon initialized")
+
+    @staticmethod
+    def _configured_retention_days() -> int:
+        raw = os.getenv("GTX_IMAGE_RETENTION_DAYS", "30")
+        try:
+            days = int(raw)
+        except ValueError:
+            logger.warning("Invalid GTX_IMAGE_RETENTION_DAYS=%r; using 30", raw)
+            return 30
+        if days < 0:
+            logger.warning("Negative GTX_IMAGE_RETENTION_DAYS=%r; using 30", raw)
+            return 30
+        return days
+
+    def _run_retention_cleanup(self) -> None:
+        try:
+            removed = self.storage.cleanup_old_tasks(self.retention_days)
+            if removed:
+                logger.info("Removed %s processed image task(s) past retention", removed)
+        except (OSError, ValueError) as exc:
+            logger.warning("Image retention cleanup failed: %s", exc)
+
+    def _recover_interrupted_tasks(self) -> None:
+        """Reconcile durable processing inputs after a daemon restart."""
+        for task_id in self.storage.processing_task_ids():
+            task = self.scheduler.get_task(task_id)
+            if task is None:
+                logger.error("Leaving orphaned processing input %s for manual recovery", task_id)
+                continue
+
+            state = task.get("state")
+            if state == "running":
+                recovered = self.scheduler.transition_running_to_retry_wait(task_id)
+            elif state == "claimed":
+                recovered = self.scheduler.requeue_claimed_to_retry_wait(task_id)
+            elif state in {"queued", "retry_wait"}:
+                recovered = True
+            elif state in {"succeeded", "failed_terminal", "awaiting_review", "cancelled"}:
+                recovered = self.storage.complete_task(
+                    task_id,
+                    result={"recovered_after_restart": True, "scheduler_state": state},
+                )
+            else:
+                logger.error("Leaving processing input %s with unknown state %r", task_id, state)
+                continue
+
+            if state in {"running", "claimed", "queued", "retry_wait"} and recovered:
+                if self.storage.requeue_for_retry(task_id):
+                    self.storage.update_metadata(task_id, {
+                        "recovered_after_restart": True,
+                        "recovery_state": state,
+                    })
+                    logger.info("Requeued interrupted image task %s from %s", task_id, state)
+                else:
+                    logger.error("Could not requeue interrupted image task %s", task_id)
 
     def _setup_signals(self):
         """Set up signal handlers for graceful shutdown."""
@@ -56,6 +116,9 @@ class SchedulerDaemon:
 
         while self._running:
             try:
+                if time.monotonic() - self._last_retention_cleanup >= 86400:
+                    self._run_retention_cleanup()
+                    self._last_retention_cleanup = time.monotonic()
                 # Try to get a queued task first
                 task = self.scheduler.get_next_task()
                 

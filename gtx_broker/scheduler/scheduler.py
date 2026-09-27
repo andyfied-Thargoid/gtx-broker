@@ -83,10 +83,11 @@ class Scheduler:
         This handles upgrade from old schema where tasks table doesn't have
         review_tag, schedule_type, or batch_epoch_id columns.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        conn = None
         try:
-            import logging
-            logger = logging.getLogger(__name__)
-            
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -107,11 +108,12 @@ class Scheduler:
                     logger.info(f"Added column {col_name} to tasks table")
             
             conn.commit()
-            conn.close()
             
         except sqlite3.Error as e:
-            logger = logging.getLogger(__name__)
             logger.error(f"Failed to upgrade tasks table schema: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with WAL mode and longer timeout."""

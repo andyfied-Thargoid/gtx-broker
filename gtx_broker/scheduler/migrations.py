@@ -80,8 +80,9 @@ class MigrationRunner:
                 return False
             migration_path = migration_path_with_ext
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             cursor = conn.cursor()
             
             # Execute each statement separately (SQLite limitation)
@@ -106,7 +107,8 @@ class MigrationRunner:
             logger.error(f"Failed to apply migration {migration_name}: {e}")
             return False
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def run_all(self) -> bool:
         """Run all pending migrations.

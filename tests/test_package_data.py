@@ -5,6 +5,7 @@ import pytest
 import tempfile
 import sys
 from pathlib import Path
+from importlib.metadata import Distribution, DistributionFinder
 
 # Derive repository root from this test file's location
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,10 +54,10 @@ class TestPackageData:
                 "SQL migration file not found in wheel package data"
 
     def test_installed_wheel_has_sql(self):
-        """Test that an installed wheel can load SQL migrations.
+        """Test that an installed wheel can be inspected for SQL files.
         
-        This simulates what happens when a user installs the package via pip
-        - the SQL files should be available as package resources.
+        This test verifies SQL files are accessible in an installed distribution
+        without importing the package (which would require dependencies).
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
@@ -84,8 +85,10 @@ class TestPackageData:
             # Determine pip path based on platform
             if sys.platform == "win32":
                 pip_path = test_dir / "Scripts" / "pip.exe"
+                python_path = test_dir / "Scripts" / "python.exe"
             else:
                 pip_path = test_dir / "bin" / "pip"
+                python_path = test_dir / "bin" / "python"
             
             # Install the wheel (no deps since we're testing package contents)
             result = subprocess.run(
@@ -96,32 +99,37 @@ class TestPackageData:
             
             assert result.returncode == 0, f"Install failed: {result.stderr}"
             
-            # Test that the SQL file is accessible
-            python_path = test_dir / "bin" / "python" if sys.platform != "win32" else test_dir / "Scripts" / "python.exe"
-            
+            # Test that the SQL file is accessible via importlib.metadata
+            # Run in test_dir so source checkout cannot shadow the installed package
             test_script = """
-import importlib.resources
-import gtx_broker.scheduler
+from importlib.metadata import distribution
 
-# Get the migrations package
-migrations_pkg = importlib.resources.files("gtx_broker.scheduler").joinpath("migrations")
+dist = distribution("gtx-broker")
 
-# Try to access the SQL file
-sql_file = migrations_pkg / "001_add_tagging.sql"
-try:
-    content = sql_file.read_text()
-    assert "batch_epochs" in content, "SQL file content not found"
-    print("SUCCESS: SQL file accessible")
-except Exception as e:
-    print(f"FAIL: {e}")
-    exit(1)
+# Find the SQL file in the distribution
+sql_file = None
+for p in dist.files:
+    if str(p) == "gtx_broker/scheduler/migrations/001_add_tagging.sql":
+        sql_file = p
+        break
+
+assert sql_file is not None, "SQL migration file not found in distribution"
+
+# Read the SQL file content
+sql_path = dist.locate_file(sql_file)
+content = sql_path.read_text()
+assert "batch_epochs" in content, "SQL file content not found"
+
+print("SUCCESS: SQL file accessible via distribution metadata")
 """
             
             result = subprocess.run(
                 [str(python_path), "-c", test_script],
+                cwd=str(test_dir),  # Run from test venv directory
                 capture_output=True,
                 text=True
             )
             
-            assert result.returncode == 0, f"SQL file not accessible in installed wheel: {result.stderr}\n{result.stdout}"
+            assert result.returncode == 0, \
+                f"SQL file not accessible in installed wheel: {result.stderr}\n{result.stdout}"
             assert "SUCCESS" in result.stdout

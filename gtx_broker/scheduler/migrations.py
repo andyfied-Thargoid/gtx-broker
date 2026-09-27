@@ -39,7 +39,9 @@ class MigrationRunner:
             """)
             if cursor.fetchone():
                 cursor.execute("SELECT migration_name FROM schema_migrations")
-                return {row[0] for row in cursor.fetchall()}
+                migrations = {row[0] for row in cursor.fetchall()}
+                conn.close()
+                return migrations
             conn.close()
         except sqlite3.OperationalError:
             pass
@@ -58,11 +60,14 @@ class MigrationRunner:
         conn.commit()
         conn.close()
 
-    def run_migration(self, migration_name: str):
+    def run_migration(self, migration_name: str) -> bool:
         """Run a single migration.
 
         Args:
             migration_name: Name of migration file (without .sql extension)
+            
+        Returns:
+            True if migration applied successfully, False on error
         """
         migrations_dir = Path(__file__).parent / "migrations"
         migration_path = migrations_dir / f"{migration_name}.sql"
@@ -75,14 +80,14 @@ class MigrationRunner:
                 return False
             migration_path = migration_path_with_ext
 
+        conn = self._get_connection()
         try:
-            with open(migration_path, 'r') as f:
-                sql = f.read()
-
-            conn = self._get_connection()
             cursor = conn.cursor()
             
             # Execute each statement separately (SQLite limitation)
+            with open(migration_path, 'r') as f:
+                sql = f.read()
+            
             for statement in sql.split(';'):
                 statement = statement.strip()
                 if statement:
@@ -93,7 +98,6 @@ class MigrationRunner:
                 (migration_name,)
             )
             conn.commit()
-            conn.close()
 
             logger.info(f"Applied migration: {migration_name}")
             return True
@@ -101,6 +105,8 @@ class MigrationRunner:
         except Exception as e:
             logger.error(f"Failed to apply migration {migration_name}: {e}")
             return False
+        finally:
+            conn.close()
 
     def run_all(self) -> bool:
         """Run all pending migrations.

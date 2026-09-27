@@ -21,14 +21,14 @@ service was restored. The GTX broker on port 11438 remained healthy throughout.
 
 This is not acceptance for unattended financial extraction. Receipt results need
 human review until duplicate-line handling and confidence/quality checks are
-implemented. Non-receipt behavior also shows that the handler currently has a
-receipt schema, rather than a general image-description schema; separate task
-prompts and schemas should be added before routing other image workflows here.
+implemented. The broker now has an explicit `image_description` schema for
+non-receipt work, but it remains opt-in and still requires workflow-specific
+review before unattended use.
 
 ## Remaining qualification checks
 
-- reject unsupported types, symlinks, missing files, and oversized files;
-- verify malformed, fenced, empty, and non-object model responses;
+- connect the Telegram/Hermes caller to the explicit schema selection;
+- add a human-review acknowledgement and approval path for receipt results;
 - verify scheduler persistence of a successful structured result and retry state
   for an unavailable worker;
 - measure model load, unload, and restore times during the 00:00–06:00 window;
@@ -37,3 +37,8 @@ prompts and schemas should be added before routing other image workflows here.
 - test restart and retry behavior without interrupting the always-loaded GTX
   broker;
 - record the exact model/projector profile whenever a benchmark is run.
+
+The deterministic handler tests now cover unsupported file content, symlinks,
+oversized images, malformed/fenced/non-object responses, receipt validation, and
+the opt-in general image-description schema. Those tests do not start or query
+the P40.

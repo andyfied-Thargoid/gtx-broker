@@ -5,10 +5,17 @@ Hermes Telegram media hook. It reads one JSON event from standard input and
 writes one JSON result to standard output.
 
 The event must include `source_path`. It may include `chat_id`, `message_id`,
-`user_id`, `kind`, `caption`, and `media_group_id`. The command validates the
-file with the storage contract, copies it atomically below the configured
-storage root, records quality metrics, and queues an idempotent nightly vision
-task. Replaying the same chat/message/file event returns the existing task.
+`user_id`, `kind`, `caption`, `media_group_id`, `schema`, and `prompt`.
+`schema` is `receipt` by default. Use `image_description` for non-receipt
+images; the broker stores that selection in the task payload and validates the
+corresponding structured response. A caller-provided `prompt` is permitted for
+an approved schema but does not bypass output validation.
+
+The command validates the file with the storage contract, verifies image
+content, copies it atomically below the configured storage root, records quality
+metrics, and queues an idempotent nightly vision task. Replaying the same
+chat/message/file event returns the existing task. Unknown schemas are rejected
+before anything is staged.
 
 Set `GTX_SCHEDULER_DB` to the scheduler database path when using a non-default
 storage root. The storage root is the parent of the database's `metadata`

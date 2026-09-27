@@ -27,6 +27,10 @@ The follow-on integration stage is included in the same branch:
 - `ReviewHandler` provides an explicit read-only Air-review command boundary,
   validates structured findings, and fails if the reviewer changes the
   worktree.
+- daemon restart reconciliation keeps scheduler and durable storage outcomes
+  recoverable when either side is interrupted;
+- configurable retention removes only terminal processed/rejected inputs and
+  stale staging directories.
 
 P40-backed tasks are preferred within the eligible queue. The policy still
 keeps image work ahead of ordinary batch work during 00:00-06:00, and general
@@ -41,6 +45,7 @@ Not implemented by this stage:
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes
   checkout documents the optional hook);
 - live Air/Coder-Next services;
-- retention cleanup and restart recovery hardening.
+- general image-description schemas: the current vision handler remains
+  receipt-specific until separate prompts and validation are added.
 
 Those remain separate stages with their own worker and integration tests.

@@ -50,6 +50,32 @@ def test_daemon_moves_staged_input_through_processing_to_processed(tmp_path):
     assert dispatched_path.parent == storage.processing_path / task_id
 
 
+def test_daemon_does_not_mark_scheduler_succeeded_when_storage_completion_fails(tmp_path):
+    storage_root = tmp_path / "storage"
+    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
+    storage = StorageContract(storage_root)
+    source = tmp_path / "receipt.jpg"
+    Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
+    task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="failed-storage")
+    staged = storage.input_path(task_id)
+    assert staged is not None
+    assert daemon.scheduler.add_task(
+        task_id, "vision", {"image_path": str(staged)}, mode="immediate", input_path=str(staged)
+    )
+
+    with (
+        patch.object(daemon, "_get_worker_for_task", return_value="p40-vision"),
+        patch("gtx_broker.daemon.get_handler_for_task") as get_handler,
+        patch.object(daemon.storage, "complete_task", return_value=False),
+    ):
+        handler = MagicMock()
+        handler.execute.return_value = HandlerResult.SUCCESS
+        get_handler.return_value = handler
+        assert daemon._dispatch_task(daemon.scheduler.get_next_task()) is False
+
+    assert daemon.scheduler.get_task(task_id)["state"] == "running"
+
+
 def test_daemon_requeues_processing_input_after_restart(tmp_path):
     storage_root = tmp_path / "storage"
     config = SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db"))

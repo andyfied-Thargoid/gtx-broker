@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from PIL import Image, ImageDraw
 
@@ -62,6 +63,22 @@ def test_telegram_ingress_stages_and_enqueues_idempotently(tmp_path):
     assert task["mode"] == "vision"
     assert task["schedule_type"] == "nightly"
     assert Path(task["input_path"]).is_file()
+
+
+def test_telegram_ingress_marks_staged_file_rejected_after_quality_failure(tmp_path):
+    source = _image(tmp_path / "source.jpg")
+    storage = StorageContract(tmp_path / "storage")
+    scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "storage" / "metadata" / "tasks.db")))
+    quality_gate = MagicMock()
+    quality_gate.assess.side_effect = RuntimeError("quality service failed")
+    ingress = TelegramImageIngress(scheduler, storage, quality_gate)
+
+    result = ingress.ingest({"source_path": str(source), "chat_id": 12, "message_id": 35})
+
+    assert result.accepted is False
+    assert result.task_id is not None
+    assert storage.get_task(result.task_id)["status"] == "rejected"
+    assert scheduler.get_task(result.task_id) is None
 
 
 def test_coding_handler_runs_explicit_executor_and_test(tmp_path):

@@ -63,31 +63,40 @@ class SchedulerDaemon:
             logger.warning("Image retention cleanup failed: %s", exc)
 
     def _recover_interrupted_tasks(self) -> None:
-        """Reconcile durable processing inputs after a daemon restart."""
-        for task_id in self.storage.processing_task_ids():
+        """Reconcile scheduler and durable storage state after a restart."""
+        for task_id in self.storage.task_ids():
             task = self.scheduler.get_task(task_id)
             if task is None:
-                logger.error("Leaving orphaned processing input %s for manual recovery", task_id)
+                logger.error("Leaving untracked durable input %s for manual recovery", task_id)
                 continue
 
             state = task.get("state")
-            if state == "running":
-                recovered = self.scheduler.transition_running_to_retry_wait(task_id)
-            elif state == "claimed":
-                recovered = self.scheduler.requeue_claimed_to_retry_wait(task_id)
-            elif state in {"queued", "retry_wait"}:
-                recovered = True
-            elif state in {"succeeded", "failed_terminal", "awaiting_review", "cancelled"}:
-                recovered = self.storage.complete_task(
-                    task_id,
-                    result={"recovered_after_restart": True, "scheduler_state": state},
-                )
-            else:
-                logger.error("Leaving processing input %s with unknown state %r", task_id, state)
+            metadata = self.storage.get_task(task_id) or {}
+            storage_status = metadata.get("status")
+            outcome = metadata.get("scheduler_outcome")
+
+            if state in {"running", "claimed"} and outcome in {
+                "succeeded", "failed", "awaiting_review", "retry_wait"
+            }:
+                if outcome == "retry_wait":
+                    storage_ready = storage_status == "accepted" or self.storage.requeue_for_retry(task_id)
+                    recovered = storage_ready and self._transition_to_retry(task_id, state)
+                elif storage_status != "processed":
+                    storage_ready = self.storage.complete_task(
+                        task_id, result=metadata.get("result"), outcome=outcome
+                    )
+                    recovered = storage_ready and self._finish_recovered_task(task_id, state, outcome, metadata)
+                else:
+                    recovered = self._finish_recovered_task(task_id, state, outcome, metadata)
+                if not recovered:
+                    logger.error("Could not reconcile image task %s after restart", task_id)
                 continue
 
-            if state in {"running", "claimed", "queued", "retry_wait"} and recovered:
-                if self.storage.requeue_for_retry(task_id):
+            if state in {"running", "claimed"}:
+                recovered = self._transition_to_retry(task_id, state)
+                if recovered and storage_status != "accepted":
+                    recovered = self.storage.requeue_for_retry(task_id)
+                if recovered:
                     self.storage.update_metadata(task_id, {
                         "recovered_after_restart": True,
                         "recovery_state": state,
@@ -95,6 +104,32 @@ class SchedulerDaemon:
                     logger.info("Requeued interrupted image task %s from %s", task_id, state)
                 else:
                     logger.error("Could not requeue interrupted image task %s", task_id)
+            elif state == "retry_wait" and storage_status == "processing":
+                if not self.storage.requeue_for_retry(task_id):
+                    logger.error("Could not requeue retrying image task %s", task_id)
+            elif state in {"succeeded", "failed_terminal", "awaiting_review", "cancelled"}:
+                if storage_status == "processing" and not self.storage.complete_task(task_id):
+                    logger.error("Could not complete terminal image task %s", task_id)
+
+    def _transition_to_retry(self, task_id: str, state: str) -> bool:
+        if state == "running":
+            return self.scheduler.transition_running_to_retry_wait(task_id)
+        if state == "claimed":
+            return self.scheduler.requeue_claimed_to_retry_wait(task_id)
+        return state == "retry_wait"
+
+    def _finish_recovered_task(
+        self, task_id: str, state: str, outcome: str, metadata: Dict[str, Any]
+    ) -> bool:
+        if state != "running":
+            return False
+        if outcome == "succeeded":
+            return self.scheduler.complete_task(task_id, result=metadata.get("result"))
+        if outcome == "failed":
+            return self.scheduler.complete_task(task_id, error="Handler execution failed")
+        if outcome == "awaiting_review":
+            return self.scheduler.transition_running_to_awaiting_review(task_id)
+        return False
 
     def _setup_signals(self):
         """Set up signal handlers for graceful shutdown."""
@@ -178,11 +213,22 @@ class SchedulerDaemon:
         task["payload"] = payload
         return True
 
-    def _requeue_staged_input(self, task_id: str) -> None:
-        self.storage.requeue_for_retry(task_id)
+    def _requeue_staged_input(self, task_id: str) -> bool:
+        try:
+            return self.storage.requeue_for_retry(task_id)
+        except (OSError, ValueError) as exc:
+            logger.error("Could not requeue durable input %s: %s", task_id, exc)
+            return False
 
-    def _complete_staged_input(self, task_id: str, result: Optional[Dict[str, Any]] = None) -> None:
-        self.storage.complete_task(task_id, result=result)
+    def _complete_staged_input(
+        self, task_id: str, result: Optional[Dict[str, Any]] = None,
+        outcome: Optional[str] = None,
+    ) -> bool:
+        try:
+            return self.storage.complete_task(task_id, result=result, outcome=outcome)
+        except (OSError, ValueError) as exc:
+            logger.error("Could not complete durable input %s: %s", task_id, exc)
+            return False
 
     def _dispatch_task(self, task: Dict[str, Any]) -> bool:
         """Execute task with proper state machine flow.
@@ -254,11 +300,14 @@ class SchedulerDaemon:
             handler = get_handler_for_task(task)
             if not handler:
                 logger.error(f"No handler found for task kind {task_kind}")
-                # No handler - permanently fail
-                self.scheduler.complete_task(task_id, error="No handler found for task kind")
-                if storage_claimed:
-                    self._complete_staged_input(task_id, {"error": "no handler"})
-                return False
+                storage_ready = not storage_claimed or self._complete_staged_input(
+                    task_id, {"error": "no handler"}, "failed"
+                )
+                if not storage_ready:
+                    return False
+                return self.scheduler.complete_task(
+                    task_id, error="No handler found for task kind"
+                )
 
             # Execute the handler (blocking call - runs on existing event loop)
             result = handler.execute(task)
@@ -268,45 +317,78 @@ class SchedulerDaemon:
                 # Task completed successfully
                 handler_result = getattr(handler, "last_result", None)
                 result_payload = handler_result if isinstance(handler_result, dict) else None
-                self.scheduler.complete_task(task_id, result=result_payload)
-                if storage_claimed:
-                    self._complete_staged_input(task_id, result_payload)
+                storage_ready = not storage_claimed or self._complete_staged_input(
+                    task_id, result_payload, "succeeded"
+                )
+                if not storage_ready:
+                    logger.error("Leaving task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.complete_task(task_id, result=result_payload):
+                    logger.error("Storage completed task %s but scheduler update failed", task_id)
+                    return False
                 logger.info(f"Task {task_id} completed successfully")
 
             elif result == HandlerResult.FAILED:
                 # Task failed
-                self.scheduler.complete_task(task_id, error="Handler execution failed")
-                if storage_claimed:
-                    self._complete_staged_input(task_id, {"error": "handler execution failed"})
+                storage_ready = not storage_claimed or self._complete_staged_input(
+                    task_id, {"error": "handler execution failed"}, "failed"
+                )
+                if not storage_ready:
+                    logger.error("Leaving failed task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.complete_task(task_id, error="Handler execution failed"):
+                    logger.error("Storage completed failed task %s but scheduler update failed", task_id)
+                    return False
                 logger.warning(f"Task {task_id} failed during handler execution")
 
             elif result == HandlerResult.RETRY:
                 # Task should retry later
-                self.scheduler.transition_running_to_retry_wait(task_id)
-                if storage_claimed:
-                    self._requeue_staged_input(task_id)
+                storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
+                if not storage_ready:
+                    logger.error("Leaving retrying task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                    logger.error("Storage requeued task %s but scheduler update failed", task_id)
+                    return False
                 logger.info(f"Task {task_id} transitioned to retry_wait")
 
             elif result == HandlerResult.WORKER_UNAVAILABLE:
                 # Worker not available (e.g., model not loaded)
                 # Mark as retry_wait to retry later
-                self.scheduler.transition_running_to_retry_wait(task_id)
-                if storage_claimed:
-                    self._requeue_staged_input(task_id)
+                storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
+                if not storage_ready:
+                    logger.error("Leaving unavailable task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                    logger.error("Storage requeued task %s but scheduler update failed", task_id)
+                    return False
                 logger.info(f"Task {task_id} transitioned to retry_wait - worker unavailable")
 
             elif result == HandlerResult.AWAITING_REVIEW:
                 # Task needs review
-                self.scheduler.transition_running_to_awaiting_review(task_id)
-                if storage_claimed:
-                    self._complete_staged_input(task_id, {"status": "awaiting_review"})
+                storage_ready = not storage_claimed or self._complete_staged_input(
+                    task_id, {"status": "awaiting_review"}, "awaiting_review"
+                )
+                if not storage_ready:
+                    logger.error("Leaving review task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.transition_running_to_awaiting_review(task_id):
+                    logger.error("Storage completed review task %s but scheduler update failed", task_id)
+                    return False
                 logger.info(f"Task {task_id} marked for review")
 
             else:
                 # Unknown result - mark as failed
-                self.scheduler.complete_task(task_id, error=f"Unknown handler result: {result}")
-                if storage_claimed:
-                    self._complete_staged_input(task_id, {"error": f"unknown result: {result}"})
+                error = f"Unknown handler result: {result}"
+                storage_ready = not storage_claimed or self._complete_staged_input(
+                    task_id, {"error": error}, "failed"
+                )
+                if not storage_ready:
+                    logger.error("Leaving unknown-result task %s running for storage recovery", task_id)
+                    return False
+                if not self.scheduler.complete_task(task_id, error=error):
+                    logger.error("Storage completed task %s but scheduler update failed", task_id)
+                    return False
                 logger.error(f"Task {task_id} resulted in unknown state: {result}")
 
             return True
@@ -314,9 +396,11 @@ class SchedulerDaemon:
         except Exception as e:
             # Unexpected error - mark as failed
             logger.exception(f"Unexpected error during task {task_id} execution: {e}")
-            self.scheduler.complete_task(task_id, error=str(e))
-            if storage_claimed:
-                self._complete_staged_input(task_id, {"error": str(e)})
+            storage_ready = not storage_claimed or self._complete_staged_input(
+                task_id, {"error": str(e)}, "failed"
+            )
+            if storage_ready:
+                self.scheduler.complete_task(task_id, error=str(e))
             return False
 
         finally:

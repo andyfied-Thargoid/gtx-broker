@@ -267,7 +267,8 @@ class StorageContract:
             raise ValueError(f"Claim failed: {e}")
 
     def complete_task(self, task_id: str, output_path: Optional[Path] = None,
-                      result: Optional[Dict[str, Any]] = None) -> bool:
+                      result: Optional[Dict[str, Any]] = None,
+                      outcome: Optional[str] = None) -> bool:
         """Move task from processing to processed directory.
 
         Args:
@@ -279,9 +280,23 @@ class StorageContract:
             True if successful
         """
         processing_task_dir = self._task_dir(self.processing_path, task_id)
+        processed_task_dir = self._task_dir(self.processed_path, task_id)
 
         if not processing_task_dir.exists():
-            return False
+            if not processed_task_dir.exists():
+                return False
+            try:
+                metadata_file = processed_task_dir / "metadata.json"
+                metadata = json.loads(metadata_file.read_text())
+                if metadata.get("status") != "processed":
+                    metadata["status"] = "processed"
+                    metadata["completed_at"] = metadata.get(
+                        "completed_at", datetime.now(timezone.utc).isoformat()
+                    )
+                    metadata_file.write_text(json.dumps(metadata, indent=2))
+                return True
+            except (OSError, json.JSONDecodeError):
+                return False
 
         try:
             # Read current metadata
@@ -289,10 +304,15 @@ class StorageContract:
             with open(metadata_file, "r") as f:
                 metadata = json.load(f)
 
-            # Move to processed first
-            import shutil
-            processed_task_dir = self.processed_path / task_id
+            if outcome:
+                metadata["scheduler_outcome"] = outcome
+            if result:
+                metadata["result"] = result
+            metadata["completion_pending"] = True
+            metadata_file.write_text(json.dumps(metadata, indent=2))
 
+            # Move to processed after recording the intended outcome.
+            import shutil
             shutil.move(str(processing_task_dir), str(processed_task_dir))
 
             # If output_path provided, move it to processed directory
@@ -303,8 +323,7 @@ class StorageContract:
             # Update metadata
             metadata["status"] = "processed"
             metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
-            if result:
-                metadata["result"] = result
+            metadata.pop("completion_pending", None)
             metadata_file = processed_task_dir / "metadata.json"
 
             with open(metadata_file, "w") as f:
@@ -366,7 +385,7 @@ class StorageContract:
                 return candidates[0]
         return None
 
-    def requeue_for_retry(self, task_id: str) -> bool:
+    def requeue_for_retry(self, task_id: str, outcome: str = "retry_wait") -> bool:
         """Move a claimed input back to incoming after a retryable attempt."""
         processing = self._task_dir(self.processing_path, task_id)
         incoming = self._task_dir(self.incoming_path, task_id)
@@ -375,20 +394,34 @@ class StorageContract:
         import shutil
         try:
             shutil.move(str(processing), str(incoming))
-            self.update_metadata(task_id, {"status": "accepted", "retry_at": datetime.now(timezone.utc).isoformat()})
-            return True
+            updated = self.update_metadata(task_id, {
+                "status": "accepted",
+                "retry_at": datetime.now(timezone.utc).isoformat(),
+                "scheduler_outcome": outcome,
+            })
+            return updated
         except OSError:
             return False
 
+    def task_ids(self) -> list[str]:
+        """Return task IDs present in any durable lifecycle directory."""
+        task_ids = set()
+        for root in (self.incoming_path, self.processing_path, self.processed_path):
+            if root.exists():
+                task_ids.update(
+                    path.name
+                    for path in root.iterdir()
+                    if path.is_dir() and (path / "metadata.json").is_file()
+                )
+        return sorted(task_ids)
+
     def processing_task_ids(self) -> list[str]:
         """Return task IDs whose durable inputs were interrupted in processing."""
-        if not self.processing_path.exists():
-            return []
         return sorted(
-            path.name
-            for path in self.processing_path.iterdir()
-            if path.is_dir() and (path / "metadata.json").is_file()
-        )
+            path.name for path in self.processing_path.iterdir()
+            if self.processing_path.exists() and path.is_dir()
+            and (path / "metadata.json").is_file()
+        ) if self.processing_path.exists() else []
 
     def reject_task(self, task_id: str, reason: str) -> bool:
         """Keep an input for audit while preventing it from being processed."""

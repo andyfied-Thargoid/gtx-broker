@@ -19,6 +19,7 @@ class MigrationRunner:
         self.db_path = db_path
         self._migrations = [
             "001_add_tagging",
+            "002_review_worker",
             # Add more migrations here as needed
         ]
 

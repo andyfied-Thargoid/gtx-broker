@@ -83,24 +83,14 @@ class SchedulerDaemon:
 
         logger.info("Daemon stopped")
 
-    def _get_worker_for_task(self, task_kind: str) -> Optional[str]:
-        """Get appropriate worker name for task kind.
+    def _get_worker_for_task(self, task_or_kind: Any) -> Optional[str]:
+        """Get an available worker for a task, including review routing.
 
         Returns:
             Worker name (profile) or None
         """
-        # P40 coding worker
-        if task_kind == "coding":
-            return "p40-coding"
-
-        # Vision tasks - let start_task() handle worker validation
-        if task_kind == "vision":
-            # Just return the profile name; start_task() will validate
-            # against WorkerRegistry and check P40 availability
-            return "p40-vision"
-
-        # Unknown kind
-        return None
+        task = task_or_kind if isinstance(task_or_kind, dict) else {"kind": task_or_kind}
+        return self.scheduler.select_worker_for_task(task)
 
     def _dispatch_task(self, task: Dict[str, Any]) -> bool:
         """Execute task with proper state machine flow.
@@ -132,7 +122,7 @@ class SchedulerDaemon:
 
         # Step 2: Start the task (with P40 atomic locking)
         # Get worker for this task kind
-        worker_name = self._get_worker_for_task(task_kind)
+        worker_name = self._get_worker_for_task(task)
         if not worker_name:
             logger.error(f"No suitable worker found for task kind {task_kind}")
             # Task cannot be processed - requeue to retry_wait

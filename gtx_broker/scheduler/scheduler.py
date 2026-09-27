@@ -36,13 +36,14 @@ class Scheduler:
                                 |          +-> retry_wait -> queued
                                 |          +-> awaiting_review
                                 |          +-> failed_terminal
-                                +-> cancelled
+                                |          +-> cancelled
+                                +-> retry_wait (for failed starts)
     """
 
     STATE_TRANSITIONS = {
         "accepted": ["queued", "cancelled"],
         "queued": ["claimed", "cancelled"],
-        "claimed": ["running", "cancelled"],
+        "claimed": ["running", "retry_wait", "cancelled"],
         "running": ["succeeded", "failed_terminal", "retry_wait", "awaiting_review"],
         "succeeded": [],
         "failed_terminal": [],

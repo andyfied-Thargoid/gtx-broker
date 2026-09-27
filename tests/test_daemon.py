@@ -413,3 +413,40 @@ class TestDaemonRetryWaitEndToEnd:
         # Verify task succeeded
         task_data = daemon.scheduler.get_task(task['id'])
         assert task_data['state'] == 'succeeded'
+
+
+class TestStateMachineCompliance:
+    """Test that state transitions comply with STATE_TRANSITIONS table."""
+
+    def test_claimed_to_retry_wait_is_allowed(self, daemon):
+        """Test that claimed → retry_wait transition is now allowed."""
+        # Add a task
+        success = daemon.scheduler.add_task(
+            task_id="TEST-COMPLIANCE-1",
+            kind="coding",
+            payload={"goal": "test"},
+            mode="immediate",
+            priority=10
+        )
+        assert success
+
+        # Claim the task
+        task = daemon.scheduler.get_next_task()
+        claimed = daemon.scheduler.claim_task(task['id'])
+        assert claimed
+
+        # Verify task is claimed
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'claimed'
+
+        # Test that _validate_transition says claimed → retry_wait is legal
+        is_valid = daemon.scheduler._validate_transition(task['id'], 'claimed', 'retry_wait')
+        assert is_valid, "claimed → retry_wait should be a valid transition"
+
+        # Now perform the transition using requeue_claimed_to_retry_wait
+        requeued = daemon.scheduler.requeue_claimed_to_retry_wait(task['id'])
+        assert requeued
+
+        # Verify task is in retry_wait
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'retry_wait'

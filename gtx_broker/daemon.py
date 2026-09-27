@@ -3,12 +3,10 @@
 import logging
 import signal
 import time
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
-from gtx_broker.scheduler.workers import WorkerStatus, WorkerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +168,9 @@ class SchedulerDaemon:
             # Step 4: Transition to final state based on result
             if result == HandlerResult.SUCCESS:
                 # Task completed successfully
-                self.scheduler.complete_task(task_id)
+                handler_result = getattr(handler, "last_result", None)
+                result_payload = handler_result if isinstance(handler_result, dict) else None
+                self.scheduler.complete_task(task_id, result=result_payload)
                 logger.info(f"Task {task_id} completed successfully")
 
             elif result == HandlerResult.FAILED:

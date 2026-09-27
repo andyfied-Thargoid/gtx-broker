@@ -58,6 +58,11 @@ class TelegramImageIngress:
         schema = event.get("schema", event.get("output_schema", VisionHandler.RECEIPT_SCHEMA))
         if not isinstance(schema, str) or schema not in VisionHandler.SUPPORTED_SCHEMAS:
             return IngressResult(False, "rejected", error=f"unsupported vision schema: {schema!r}")
+        requires_review = event.get("requires_review")
+        if requires_review is None:
+            requires_review = schema == VisionHandler.RECEIPT_SCHEMA
+        if not isinstance(requires_review, bool):
+            return IngressResult(False, "rejected", error="requires_review must be boolean")
 
         source_chat = event.get("chat_id")
         source_message = event.get("message_id")
@@ -108,6 +113,7 @@ class TelegramImageIngress:
                 },
                 "quality": quality.as_dict(),
                 "schema": schema,
+                "requires_review": requires_review,
             }
             if event.get("prompt"):
                 payload["prompt"] = event["prompt"]

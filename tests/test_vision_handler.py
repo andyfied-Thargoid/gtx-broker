@@ -144,6 +144,25 @@ def test_vision_handler_supports_explicit_general_image_schema(tmp_path):
     assert handler.last_result == result_payload
 
 
+def test_vision_handler_holds_valid_receipt_for_review(tmp_path):
+    image = _image(tmp_path / "receipt.jpg")
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return FakeResponse({"data": [{"id": "vision.gguf"}]})
+        return FakeResponse({"choices": [{"message": {"content": json.dumps(VALID_RESULT)}}]})
+
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen", side_effect=fake_urlopen):
+        result = handler.execute({
+            "kind": "vision",
+            "payload": {"image_path": str(image), "requires_review": True},
+        })
+
+    assert result is HandlerResult.AWAITING_REVIEW
+    assert handler.last_result == VALID_RESULT
+
+
 FENCE = chr(96) * 3
 
 

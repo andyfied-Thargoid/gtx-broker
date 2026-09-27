@@ -28,7 +28,8 @@ review before unattended use.
 ## Remaining qualification checks
 
 - connect the Telegram/Hermes caller to the explicit schema selection;
-- add a human-review acknowledgement and approval path for receipt results;
+- connect Hermes authorization and user-facing acknowledgement to the broker's
+  human-review approval path;
 - verify scheduler persistence of a successful structured result and retry state
   for an unavailable worker;
 - measure model load, unload, and restore times during the 00:00–06:00 window;

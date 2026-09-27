@@ -8,8 +8,11 @@ The event must include `source_path`. It may include `chat_id`, `message_id`,
 `user_id`, `kind`, `caption`, `media_group_id`, `schema`, and `prompt`.
 `schema` is `receipt` by default. Use `image_description` for non-receipt
 images; the broker stores that selection in the task payload and validates the
-corresponding structured response. A caller-provided `prompt` is permitted for
-an approved schema but does not bypass output validation.
+corresponding structured response. Receipt tasks default to
+`requires_review=true`; callers may explicitly set `requires_review=false` only
+for workflows that have separately been approved for unattended processing. A
+caller-provided `prompt` is permitted for an approved schema but does not bypass
+output validation.
 
 The command validates the file with the storage contract, verifies image
 content, copies it atomically below the configured storage root, records quality
@@ -28,6 +31,11 @@ download checks. Configure its optional
 and preserve the JSON result for the user-facing acknowledgement. If the
 command is unavailable or returns a rejection, Hermes should retain its normal
 temporary-cache behavior and report that processing could not be queued.
+
+The broker's VisionReviewService is the storage/scheduler boundary for the
+authorized review UI: it lists `awaiting_review` tasks and records an approval
+or rejection before making the scheduler transition. A Telegram-facing adapter
+must enforce the Hermes approval list before calling those methods.
 
 The scheduler daemon moves accepted input from `incoming/` to `processing/`
 before a worker reads it, then moves it to `processed/` on completion or back

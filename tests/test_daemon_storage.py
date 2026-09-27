@@ -79,6 +79,40 @@ def test_daemon_does_not_mark_scheduler_succeeded_when_storage_completion_fails(
     assert daemon.scheduler.get_task(task_id)["state"] == "running"
 
 
+def test_daemon_persists_vision_result_when_review_is_required(tmp_path):
+    storage_root = tmp_path / "storage"
+    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
+    storage = StorageContract(storage_root)
+    source = tmp_path / "receipt.jpg"
+    Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
+    task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="review")
+    staged = storage.input_path(task_id)
+    assert staged is not None
+    assert daemon.scheduler.add_task(
+        task_id,
+        "vision",
+        {"image_path": str(staged), "requires_review": True},
+        mode="immediate",
+        input_path=str(staged),
+    )
+
+    vision_result = {"merchant": "ASDA", "totals": {"total": 1.0}}
+    with (
+        patch.object(daemon, "_get_worker_for_task", return_value="p40-vision"),
+        patch("gtx_broker.daemon.get_handler_for_task") as get_handler,
+    ):
+        handler = MagicMock()
+        handler.execute.return_value = HandlerResult.AWAITING_REVIEW
+        handler.last_result = vision_result
+        get_handler.return_value = handler
+        assert daemon._dispatch_task(daemon.scheduler.get_next_task()) is True
+
+    assert daemon.scheduler.get_task(task_id)["state"] == "awaiting_review"
+    metadata = storage.get_task(task_id)
+    assert metadata["status"] == "processed"
+    assert metadata["result"]["vision_result"] == vision_result
+
+
 def test_requeue_repairs_directory_moved_before_metadata_update(tmp_path):
     storage = StorageContract(tmp_path / "storage")
     source = tmp_path / "receipt.jpg"

@@ -188,6 +188,8 @@ invent details and return JSON only."""
             logger.error("Vision output failed validation: %s", error)
             return HandlerResult.FAILED
         self.last_result = result
+        if payload.get("requires_review") is True:
+            return HandlerResult.AWAITING_REVIEW
         return HandlerResult.SUCCESS
 
     @staticmethod

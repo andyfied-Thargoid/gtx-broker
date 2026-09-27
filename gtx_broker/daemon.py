@@ -372,8 +372,13 @@ class SchedulerDaemon:
 
             elif result == HandlerResult.AWAITING_REVIEW:
                 # Task needs review
+                handler_result = getattr(handler, "last_result", None)
+                review_result = {
+                    "status": "awaiting_review",
+                    "vision_result": handler_result if isinstance(handler_result, dict) else None,
+                }
                 storage_ready = not storage_claimed or self._complete_staged_input(
-                    task_id, {"status": "awaiting_review"}, "awaiting_review"
+                    task_id, review_result, "awaiting_review"
                 )
                 if not storage_ready:
                     logger.error("Leaving review task %s running for storage recovery", task_id)

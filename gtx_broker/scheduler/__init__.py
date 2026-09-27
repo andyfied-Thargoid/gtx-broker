@@ -13,6 +13,7 @@ from .handlers import (
 )
 from .epoch_manager import EpochManager
 from .quality import ImageQualityGate, QualityAssessment
+from .review import VisionReviewService
 
 __all__ = [
     # Core scheduler
@@ -31,6 +32,7 @@ __all__ = [
     "ScheduleWindow",
     "get_dispatch_policy",
     "EpochManager",
+    "VisionReviewService",
     "ImageQualityGate",
     "QualityAssessment",
     # Handlers

@@ -19,6 +19,11 @@ The follow-on integration stage is included in the same branch:
 - `ImageQualityGate` records dimensions, orientation, brightness, clipping,
   focus, content hash, and deterministic `pass`/`degraded`/`needs_review`/
   `reject` status;
+- vision output contracts now distinguish receipt extraction from the opt-in
+  general `image_description` schema, with actual image-content validation;
+- receipt ingress defaults to durable human review, and
+  `VisionReviewService` records approval or rejection before the scheduler
+  reaches a terminal state;
 - `gtx-image-ingress --json-stdin` validates and atomically stages a Telegram
   image, records source metadata, applies the quality gate, and creates an
   idempotent nightly vision task;
@@ -44,6 +49,7 @@ Not implemented by this stage:
 - a configured production coding executor;
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes
   checkout documents the optional hook);
+- a Telegram-facing review acknowledgement/approval adapter;
 - live Air/Coder-Next services;
 - general image-description schemas: the current vision handler remains
   receipt-specific until separate prompts and validation are added.

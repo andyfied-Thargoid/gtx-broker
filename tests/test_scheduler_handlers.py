@@ -62,6 +62,7 @@ def test_telegram_ingress_stages_and_enqueues_idempotently(tmp_path):
     task = scheduler.get_task(first.task_id)
     assert task["mode"] == "vision"
     assert task["schedule_type"] == "nightly"
+    assert task["payload"]["requires_review"] is True
     assert Path(task["input_path"]).is_file()
 
 
@@ -83,6 +84,7 @@ def test_telegram_ingress_persists_explicit_general_image_schema(tmp_path):
     task = scheduler.get_task(result.task_id)
     assert task["payload"]["schema"] == "image_description"
     assert task["payload"]["prompt"] == "Describe the visible scene literally."
+    assert task["payload"]["requires_review"] is False
 
 
 def test_telegram_ingress_rejects_unknown_schema_before_staging(tmp_path):

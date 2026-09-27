@@ -42,3 +42,4 @@ python3 -m pytest -q
 The package has no runtime dependencies outside the Python standard library.
 Workstation and Telegram integration remain separate deployment concerns and
 are verified on compute01 before their local compatibility imports are removed.
+

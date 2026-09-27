@@ -273,20 +273,26 @@ class SchedulerDaemon:
         worker_name = self._get_worker_for_task(task)
         if not worker_name:
             logger.error(f"No suitable worker found for task kind {task_kind}")
-            if storage_claimed:
-                self._requeue_staged_input(task_id)
+            if storage_claimed and not self._requeue_staged_input(task_id):
+                logger.error("Leaving task %s claimed for storage recovery", task_id)
+                return False
             # Task cannot be processed - requeue to retry_wait
-            self.scheduler.requeue_claimed_to_retry_wait(task_id)
+            if not self.scheduler.requeue_claimed_to_retry_wait(task_id):
+                logger.error("Could not move task %s to retry_wait", task_id)
+                return False
             logger.info(f"Task {task_id} requeued to retry_wait - no worker available")
             return False
 
         # Start task with worker profile
         if not self.scheduler.start_task(task_id, worker_profile=worker_name):
-            if storage_claimed:
-                self._requeue_staged_input(task_id)
+            if storage_claimed and not self._requeue_staged_input(task_id):
+                logger.error("Leaving task %s claimed for storage recovery", task_id)
+                return False
             logger.error(f"Failed to start task {task_id} - worker unavailable or resource conflict")
             # Task cannot be started - requeue to retry_wait
-            self.scheduler.requeue_claimed_to_retry_wait(task_id)
+            if not self.scheduler.requeue_claimed_to_retry_wait(task_id):
+                logger.error("Could not move task %s to retry_wait", task_id)
+                return False
             logger.info(f"Task {task_id} requeued to retry_wait - worker unavailable or P40 busy")
             return False
 

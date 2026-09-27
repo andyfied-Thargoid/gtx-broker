@@ -386,21 +386,37 @@ class StorageContract:
         return None
 
     def requeue_for_retry(self, task_id: str, outcome: str = "retry_wait") -> bool:
-        """Move a claimed input back to incoming after a retryable attempt."""
+        """Move a claimed input back to incoming, safely across restart races."""
         processing = self._task_dir(self.processing_path, task_id)
         incoming = self._task_dir(self.incoming_path, task_id)
+        retry_at = datetime.now(timezone.utc).isoformat()
+        if incoming.is_dir() and not processing.exists():
+            return self.update_metadata(task_id, {
+                "status": "accepted",
+                "retry_at": retry_at,
+                "scheduler_outcome": outcome,
+            })
         if not processing.is_dir() or incoming.exists():
             return False
         import shutil
         try:
+            metadata_file = processing / "metadata.json"
+            metadata = json.loads(metadata_file.read_text())
+            metadata.update({
+                "retry_at": retry_at,
+                "scheduler_outcome": outcome,
+            })
+            temporary = metadata_file.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+            os.replace(temporary, metadata_file)
             shutil.move(str(processing), str(incoming))
             updated = self.update_metadata(task_id, {
                 "status": "accepted",
-                "retry_at": datetime.now(timezone.utc).isoformat(),
+                "retry_at": retry_at,
                 "scheduler_outcome": outcome,
             })
             return updated
-        except OSError:
+        except (OSError, json.JSONDecodeError):
             return False
 
     def task_ids(self) -> list[str]:

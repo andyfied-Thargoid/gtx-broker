@@ -1,10 +1,13 @@
 """Tests for durable image storage around daemon dispatch."""
 
 import json
+import shutil
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from PIL import Image
 
 from gtx_broker.daemon import SchedulerDaemon
@@ -74,6 +77,52 @@ def test_daemon_does_not_mark_scheduler_succeeded_when_storage_completion_fails(
         assert daemon._dispatch_task(daemon.scheduler.get_next_task()) is False
 
     assert daemon.scheduler.get_task(task_id)["state"] == "running"
+
+
+def test_requeue_repairs_directory_moved_before_metadata_update(tmp_path):
+    storage = StorageContract(tmp_path / "storage")
+    source = tmp_path / "receipt.jpg"
+    Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
+    task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="crash")
+    assert storage.claim_for_processing(task_id)
+    shutil.move(
+        str(storage.processing_path / task_id),
+        str(storage.incoming_path / task_id),
+    )
+
+    assert storage.requeue_for_retry(task_id) is True
+    metadata = storage.get_task(task_id)
+    assert metadata["status"] == "accepted"
+    assert metadata["scheduler_outcome"] == "retry_wait"
+
+
+@pytest.mark.parametrize("start_failure", [False, True])
+def test_claimed_task_waits_for_storage_requeue_before_retry(tmp_path, start_failure):
+    storage_root = tmp_path / "storage"
+    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
+    storage = StorageContract(storage_root)
+    source = tmp_path / "receipt.jpg"
+    Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
+    task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="no-worker")
+    staged = storage.input_path(task_id)
+    assert staged is not None
+    assert daemon.scheduler.add_task(
+        task_id, "vision", {"image_path": str(staged)}, mode="immediate", input_path=str(staged)
+    )
+    task = daemon.scheduler.get_next_task()
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(
+            daemon, "_get_worker_for_task",
+            return_value=None if not start_failure else "p40-vision",
+        ))
+        stack.enter_context(patch.object(daemon.storage, "requeue_for_retry", return_value=False))
+        if start_failure:
+            stack.enter_context(patch.object(daemon.scheduler, "start_task", return_value=False))
+        assert daemon._dispatch_task(task) is False
+
+    assert daemon.scheduler.get_task(task_id)["state"] == "claimed"
+    assert storage.get_task(task_id)["status"] == "processing"
 
 
 def test_daemon_requeues_processing_input_after_restart(tmp_path):

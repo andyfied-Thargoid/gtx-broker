@@ -58,16 +58,14 @@ class TaskHandler(ABC):
         pass
 
     @abstractmethod
-    def execute(self, task_payload: Dict[str, Any],
-                metadata_path: str) -> tuple[HandlerResult, Optional[Dict[str, Any]], Optional[str]]:
+    def execute(self, task: Dict[str, Any]) -> HandlerResult:
         """Execute the handler on the task.
 
         Args:
-            task_payload: Task payload
-            metadata_path: Path to task metadata directory
+            task: Task dict from scheduler (has 'kind', 'payload', etc.)
 
         Returns:
-            Tuple of (result, output_data, error_message)
+            HandlerResult indicating outcome
         """
         pass
 

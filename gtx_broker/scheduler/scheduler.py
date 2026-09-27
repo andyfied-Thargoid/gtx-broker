@@ -851,6 +851,47 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
+    def requeue_claimed_to_retry_wait(self, task_id: str) -> bool:
+        """Transition claimed → retry_wait (for when task cannot start).
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            True if requeued
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "claimed":
+                conn.close()
+                return False
+            
+            to_state = "retry_wait"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), 
+                  datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_retry_wait",
+                               from_state="claimed", to_state=to_state)
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
     def requeue_retry_wait(self, task_id: str) -> bool:
         """Transition retry_wait → queued with delay enforcement.
 
@@ -972,6 +1013,51 @@ class Scheduler:
                 self._emit_event(task_id, "task_completed",
                                from_state="awaiting_review", to_state=to_state,
                                details=f"result=failure")
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def transition_running_to_retry_wait(self, task_id: str) -> bool:
+        """Transition running → retry_wait, closing current attempt.
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            True if transitioned
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "running":
+                conn.close()
+                return False
+            
+            # Close current attempt before transitioning
+            self._close_current_attempt(task_id)
+            
+            to_state = "retry_wait"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), 
+                  datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                # Emit retry_wait event
+                self._emit_event(task_id, "task_retry_wait",
+                               from_state="running", to_state=to_state)
                 conn.commit()
                 
             conn.close()

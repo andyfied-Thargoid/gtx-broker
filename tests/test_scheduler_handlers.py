@@ -146,6 +146,27 @@ def test_coding_handler_runs_explicit_executor_and_test(tmp_path):
     assert result is HandlerResult.SUCCESS
 
 
+def test_coding_handler_uses_constructor_timeout_when_payload_omits_it(tmp_path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    command = [sys.executable, "-c", "import time; time.sleep(1)"]
+
+    handler = CodingHandler(timeout=0.01)
+    result = handler.execute({
+        "kind": "coding",
+        "payload": {
+            "worktree_path": str(worktree),
+            "executor_command": command,
+            "require_commit": False,
+        },
+    })
+
+    assert result is HandlerResult.RETRY
+    assert handler.last_result is not None
+    assert "timed out" in handler.last_result["error"]
+
+
 def test_review_handler_is_read_only_and_validates_findings(tmp_path):
     worktree = tmp_path / "repo"
     worktree.mkdir()

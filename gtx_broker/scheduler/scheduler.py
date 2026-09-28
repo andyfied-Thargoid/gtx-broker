@@ -676,17 +676,27 @@ class Scheduler:
     def select_worker_for_task(self, task: Dict[str, Any]) -> Optional[str]:
         """Select an available worker without crossing task boundaries.
 
-        Vision and coding are deliberately explicit P40 capabilities. Review
-        tasks use the configured review worker and do not silently fall back to
-        the P40 or GTX when that worker is unavailable.
+        Vision is deliberately an explicit P40 capability. Immediate coding
+        also stays on the P40; non-urgent batch/nightly coding is assigned to
+        the isolated CPU/RAM slow coder. Review tasks use the configured review
+        worker and do not silently fall back to the P40 or GTX when that worker
+        is unavailable.
         """
         if task.get("review_tag") or task.get("review_worker"):
             profile = task.get("review_worker") or "air-review"
         else:
-            profile = {
-                "vision": "p40-vision",
-                "coding": "p40-coding",
-            }.get(task.get("kind"))
+            payload = task.get("payload") or {}
+            requested_profile = task.get("worker_profile") or payload.get("worker_profile")
+            if requested_profile:
+                profile = requested_profile
+            elif task.get("kind") == "vision":
+                profile = "p40-vision"
+            elif task.get("kind") == "coding":
+                nightly = task.get("schedule_type") == "nightly"
+                batch = task.get("mode") in {"batch", "maintenance"}
+                profile = "slow-coder" if nightly or batch else "p40-coding"
+            else:
+                profile = None
             if profile is None:
                 profile = "gtx-chat" if task.get("kind") in {
                     "query", "conversation", "general"

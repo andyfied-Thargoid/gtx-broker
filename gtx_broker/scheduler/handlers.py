@@ -386,7 +386,8 @@ invent details and return JSON only."""
 class CodingHandler(TaskHandler):
     """Coding task handler (implements TaskHandler).
 
-    Processes coding tasks using P40 coding worker.
+    Processes coding tasks using the selected coding worker. Immediate tasks
+    default to P40; the scheduler marks nightly/batch tasks as slow-coder work.
     """
 
     def __init__(self, timeout: Optional[float] = None):
@@ -419,8 +420,10 @@ class CodingHandler(TaskHandler):
         """
         self.last_result = None
         payload = task.get("payload") or {}
+        worker_profile = task.get("worker_profile") or payload.get("worker_profile") or "p40-coding"
         worktree = payload.get("worktree_path") or payload.get("repository_path")
-        command = payload.get("executor_command") or os.getenv("P40_CODING_COMMAND")
+        command_env = "SLOW_CODER_COMMAND" if worker_profile == "slow-coder" else "P40_CODING_COMMAND"
+        command = payload.get("executor_command") or os.getenv(command_env)
         if not worktree or not command:
             return HandlerResult.WORKER_UNAVAILABLE
         worktree_path = Path(str(worktree)).expanduser()
@@ -430,11 +433,18 @@ class CodingHandler(TaskHandler):
         if not argv:
             return HandlerResult.WORKER_UNAVAILABLE
         instruction = payload.get("instruction") or payload.get("goal") or "Implement the task."
+        timeout = float(
+            payload.get("timeout")
+            or os.getenv(
+                "SLOW_CODER_TIMEOUT" if worker_profile == "slow-coder" else "P40_CODING_TIMEOUT",
+                "3600" if worker_profile == "slow-coder" else "1800",
+            )
+        )
         try:
             before = self._git_status(worktree_path)
             completed = subprocess.run(
                 argv, cwd=worktree_path, input=str(instruction), capture_output=True,
-                text=True, timeout=self.timeout, check=False,
+                text=True, timeout=timeout, check=False,
             )
             tests_passed = True
             test_output = ""
@@ -443,7 +453,7 @@ class CodingHandler(TaskHandler):
                 test_argv = shlex.split(test_command) if isinstance(test_command, str) else list(test_command)
                 tested = subprocess.run(
                     test_argv, cwd=worktree_path, capture_output=True, text=True,
-                    timeout=self.timeout, check=False,
+                    timeout=timeout, check=False,
                 )
                 tests_passed = tested.returncode == 0
                 test_output = (tested.stdout + tested.stderr)[-12000:]

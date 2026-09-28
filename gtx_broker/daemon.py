@@ -301,6 +301,11 @@ class SchedulerDaemon:
 
         logger.info(f"Task {task_id} started with worker {worker_name}")
 
+        # Handlers need the resolved profile to select the matching executor
+        # command. Keep the worker decision durable in scheduler state while
+        # exposing it explicitly to the in-process handler.
+        task["worker_profile"] = worker_name
+
         # Mark as active
         self._active_tasks[task_id] = True
 

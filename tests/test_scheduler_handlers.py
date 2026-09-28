@@ -2,7 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
 
@@ -165,6 +165,33 @@ def test_coding_handler_uses_constructor_timeout_when_payload_omits_it(tmp_path)
     assert result is HandlerResult.RETRY
     assert handler.last_result is not None
     assert "timed out" in handler.last_result["error"]
+
+
+def test_coding_handler_selects_slow_coder_timeout(monkeypatch, tmp_path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    task = {
+        "kind": "coding",
+        "worker_profile": "slow-coder",
+        "payload": {
+            "worktree_path": str(worktree),
+            "executor_command": [sys.executable, "-c", "pass"],
+            "require_commit": False,
+            "allow_no_change": True,
+        },
+    }
+
+    def run_with_timeout():
+        with patch("gtx_broker.scheduler.handlers.subprocess.run", return_value=completed) as run:
+            assert CodingHandler().execute(task) is HandlerResult.SUCCESS
+            return run.call_args_list[1].kwargs["timeout"]
+
+    monkeypatch.delenv("SLOW_CODER_TIMEOUT", raising=False)
+    assert run_with_timeout() == 3600.0
+
+    monkeypatch.setenv("SLOW_CODER_TIMEOUT", "2700")
+    assert run_with_timeout() == 2700.0
 
 
 def test_review_handler_is_read_only_and_validates_findings(tmp_path):

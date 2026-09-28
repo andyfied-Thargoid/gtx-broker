@@ -391,7 +391,7 @@ class CodingHandler(TaskHandler):
     """
 
     def __init__(self, timeout: Optional[float] = None):
-        self.timeout = timeout if timeout is not None else float(os.getenv("P40_CODING_TIMEOUT", "1800"))
+        self.timeout = timeout
         self.last_result: Optional[Dict[str, Any]] = None
 
     @property
@@ -434,7 +434,15 @@ class CodingHandler(TaskHandler):
             return HandlerResult.WORKER_UNAVAILABLE
         instruction = payload.get("instruction") or payload.get("goal") or "Implement the task."
         payload_timeout = payload.get("timeout")
-        timeout = float(self.timeout if payload_timeout is None else payload_timeout)
+        if payload_timeout is not None:
+            timeout = float(payload_timeout)
+        elif self.timeout is not None:
+            timeout = float(self.timeout)
+        else:
+            timeout = float(os.getenv(
+                "SLOW_CODER_TIMEOUT" if worker_profile == "slow-coder" else "P40_CODING_TIMEOUT",
+                "3600" if worker_profile == "slow-coder" else "1800",
+            ))
         try:
             before = self._git_status(worktree_path)
             completed = subprocess.run(

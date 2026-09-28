@@ -19,6 +19,26 @@ service was restored. The GTX broker on port 11438 remained healthy throughout.
 | Flowers, bed | failed validation | 5.11 s | Correctly rejected as non-receipt input. |
 | Flowers, home | failed validation | 5.11 s | Correctly rejected as non-receipt input. |
 
+## Live general-schema qualification — 2026-09-28
+
+The P40 service was temporarily replaced on port 11436 with the same Qwen3.5
+35B Q3 model plus
+`/mnt/scratch/models/qwen35-vision/Qwen3.5-35B-mmproj-F16.gguf`, using a 65536
+context and reasoning disabled. The normal Qwen3.5 service was restored
+afterwards with its original 262144 context command. GTX 11438 remained healthy
+throughout.
+
+| Input | Schema | Result | Wall time | Observation |
+| --- | --- | --- | ---: | --- |
+| Asda receipt | receipt | awaiting_review | 13.68 s | Structured result; duplicate product and promotion lines remain. |
+| Yoghurt bottle | image_description | success | 10.00 s | Accurate bottle, label text, and strawberry description. |
+| Flowers, bed | image_description | success | 10.93 s | Accurate flower-bed, benches, path, and visible text description. |
+| Flowers, home | image_description | success | 11.76 s | Accurate garden/house description and visible text. |
+
+These runs used the broker's live validation path and did not alter GTX. The
+receipt was correctly held for human review rather than treated as unattended
+financial extraction.
+
 This is not acceptance for unattended financial extraction. Receipt results need
 human review until duplicate-line handling and confidence/quality checks are
 implemented. The broker now has an explicit `image_description` schema for

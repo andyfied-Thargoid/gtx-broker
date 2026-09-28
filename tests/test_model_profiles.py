@@ -41,3 +41,24 @@ def test_unconfigured_profile_boundary_is_a_noop():
     with controller.profile("vision"):
         assert controller.active_profile == "default"
     assert controller.active_profile == "default"
+
+
+def test_partial_profile_switch_attempts_default_restoration():
+    calls = []
+    controller = P40ModelProfileController(
+        switch_command="switch-p40 {profile}", default_profile="default", timeout=1
+    )
+    failed = type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "startup failed"})()
+    restored = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv[-1])
+        return failed if len(calls) == 1 else restored
+
+    with patch("gtx_broker.scheduler.model_profiles.subprocess.run", side_effect=fake_run):
+        with pytest.raises(ModelProfileError):
+            with controller.profile("vision"):
+                raise AssertionError("work must not run")
+
+    assert calls == ["vision", "default"]
+    assert controller.active_profile == "default"

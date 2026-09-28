@@ -70,10 +70,37 @@ stop_temporary_vision() {
     wait_for_port_free
 }
 
+restore_coding_service() {
+    local failed=0
+    if ! stop_temporary_vision; then
+        failed=1
+    fi
+    if ! systemctl --user start llama-qwen35.service; then
+        failed=1
+    fi
+    if ! wait_for_health; then
+        failed=1
+    fi
+    return "$failed"
+}
+
+fail_vision_switch() {
+    echo "$1" >&2
+    if restore_coding_service; then
+        echo "restored P40 coding service after vision startup failure" >&2
+    else
+        echo "ERROR: could not restore P40 coding service after vision startup failure" >&2
+    fi
+    exit 1
+}
 case "$profile" in
     p40-vision)
-        systemctl --user stop llama-qwen35.service
-        wait_for_port_free
+        if ! systemctl --user stop llama-qwen35.service; then
+            fail_vision_switch "could not stop P40 coding service"
+        fi
+        if ! wait_for_port_free; then
+            fail_vision_switch "P40 port 11436 did not become free for vision startup"
+        fi
         nohup "$server" \
             --model "$model" \
             --mmproj "$mmproj" \
@@ -81,8 +108,14 @@ case "$profile" in
             --device CUDA0 --main-gpu 0 --split-mode none -ngl 999 \
             --reasoning off --no-reasoning-preserve \
             >"$log_file" 2>&1 &
-        echo $! >"$pid_file"
-        wait_for_health
+        vision_pid=$!
+        echo "$vision_pid" >"$pid_file"
+        if ! kill -0 "$vision_pid" 2>/dev/null; then
+            fail_vision_switch "vision server exited during startup"
+        fi
+        if ! wait_for_health; then
+            fail_vision_switch "vision server did not become healthy"
+        fi
         ;;
     p40-coding)
         stop_temporary_vision

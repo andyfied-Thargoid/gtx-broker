@@ -43,13 +43,13 @@ class P40ModelProfileController:
     def active_profile(self) -> str:
         return self._active_profile
 
-    def switch(self, profile: str) -> bool:
+    def switch(self, profile: str, *, force: bool = False) -> bool:
         """Switch to a named profile, or no-op when switching is unconfigured."""
         if not profile:
             raise ValueError("profile is required")
         if not self.switch_command:
             return True
-        if profile == self._active_profile:
+        if not force and profile == self._active_profile:
             return True
         argv = [
             token.replace("{profile}", profile)
@@ -73,14 +73,15 @@ class P40ModelProfileController:
         self._active_profile = profile
         return True
 
-    def restore_default(self) -> bool:
+    def restore_default(self, *, force: bool = False) -> bool:
         """Restore the configured default profile after temporary work."""
-        return self.switch(self.default_profile)
+        return self.switch(self.default_profile, force=force)
 
     @contextmanager
     def profile(self, profile: str) -> Iterator[None]:
         """Run work under a profile and restore the default in `finally`."""
         if not self.switch(profile):
+            self.restore_default(force=True)
             raise ModelProfileError(f"could not switch P40 to {profile}")
         try:
             yield

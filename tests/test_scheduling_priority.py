@@ -42,6 +42,25 @@ def test_image_window_blocks_batch_until_images_are_drained(tmp_path):
     with patch.object(scheduler._policy, "get_current_window", return_value=ScheduleWindow.BATCH_WINDOW):
         task = scheduler.get_next_task()
     assert task["id"] == "batch"
+    assert scheduler.select_worker_for_task(task) == "slow-coder"
+
+
+def test_immediate_coding_stays_on_p40(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler.add_task("code", "coding", {}, "immediate", priority=100, idempotency_key="code")
+
+    task = scheduler.get_task("code")
+    assert scheduler.select_worker_for_task(task) == "p40-coding"
+
+
+def test_batch_coding_can_explicitly_use_p40(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler.add_task(
+        "hard-code", "coding", {"worker_profile": "p40-coding"}, "batch",
+        priority=100, idempotency_key="hard-code",
+    )
+
+    task = scheduler.get_task("hard-code")
     assert scheduler.select_worker_for_task(task) == "p40-coding"
 
 

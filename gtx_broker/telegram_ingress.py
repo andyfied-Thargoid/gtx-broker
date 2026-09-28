@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .scheduler import Scheduler, SchedulerConfig, StorageContract
+from .scheduler.handlers import VisionHandler
 from .scheduler.quality import ImageQualityGate
 
 
@@ -54,6 +55,14 @@ class TelegramImageIngress:
         valid, error, metadata = self.storage.validate_input(source_path)
         if not valid or metadata is None:
             return IngressResult(False, "rejected", error=error)
+        schema = event.get("schema", event.get("output_schema", VisionHandler.RECEIPT_SCHEMA))
+        if not isinstance(schema, str) or schema not in VisionHandler.SUPPORTED_SCHEMAS:
+            return IngressResult(False, "rejected", error=f"unsupported vision schema: {schema!r}")
+        requires_review = event.get("requires_review")
+        if requires_review is None:
+            requires_review = schema == VisionHandler.RECEIPT_SCHEMA
+        if not isinstance(requires_review, bool):
+            return IngressResult(False, "rejected", error="requires_review must be boolean")
 
         source_chat = event.get("chat_id")
         source_message = event.get("message_id")
@@ -103,7 +112,11 @@ class TelegramImageIngress:
                     "media_group_id": event.get("media_group_id"),
                 },
                 "quality": quality.as_dict(),
+                "schema": schema,
+                "requires_review": requires_review,
             }
+            if event.get("prompt"):
+                payload["prompt"] = event["prompt"]
             added = self.scheduler.add_task(
                 task_id,
                 "vision",

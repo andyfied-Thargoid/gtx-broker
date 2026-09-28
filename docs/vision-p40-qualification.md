@@ -19,16 +19,42 @@ service was restored. The GTX broker on port 11438 remained healthy throughout.
 | Flowers, bed | failed validation | 5.11 s | Correctly rejected as non-receipt input. |
 | Flowers, home | failed validation | 5.11 s | Correctly rejected as non-receipt input. |
 
+## Live general-schema qualification — 2026-09-28
+
+The P40 service was temporarily replaced on port 11436 with the same Qwen3.5
+35B Q3 model plus
+`/mnt/scratch/models/qwen35-vision/Qwen3.5-35B-mmproj-F16.gguf`, using a 65536
+context and reasoning disabled. The normal Qwen3.5 service was restored
+afterwards with its original 262144 context command. GTX 11438 remained healthy
+throughout.
+
+| Input | Schema | Result | Wall time | Observation |
+| --- | --- | --- | ---: | --- |
+| Asda receipt | receipt | awaiting_review | 13.68 s | Structured result; duplicate product and promotion lines remain. |
+| Yoghurt bottle | image_description | success | 10.00 s | Accurate bottle, label text, and strawberry description. |
+| Flowers, bed | image_description | success | 10.93 s | Accurate flower-bed, benches, path, and visible text description. |
+| Flowers, home | image_description | success | 11.76 s | Accurate garden/house description and visible text. |
+
+The guarded profile-switch smoke test measured approximately 6 seconds from
+the coding service stop to healthy vision service, and 9 seconds to stop vision
+and restore the healthy coding service. These are service-switch timings, not
+model inference timings.
+
+These runs used the broker's live validation path and did not alter GTX. The
+receipt was correctly held for human review rather than treated as unattended
+financial extraction.
+
 This is not acceptance for unattended financial extraction. Receipt results need
 human review until duplicate-line handling and confidence/quality checks are
-implemented. Non-receipt behavior also shows that the handler currently has a
-receipt schema, rather than a general image-description schema; separate task
-prompts and schemas should be added before routing other image workflows here.
+implemented. The broker now has an explicit `image_description` schema for
+non-receipt work, but it remains opt-in and still requires workflow-specific
+review before unattended use.
 
 ## Remaining qualification checks
 
-- reject unsupported types, symlinks, missing files, and oversized files;
-- verify malformed, fenced, empty, and non-object model responses;
+- connect the Telegram/Hermes caller to the explicit schema selection;
+- connect Hermes authorization and user-facing acknowledgement to the broker's
+  human-review approval path;
 - verify scheduler persistence of a successful structured result and retry state
   for an unavailable worker;
 - measure model load, unload, and restore times during the 00:00–06:00 window;
@@ -37,3 +63,16 @@ prompts and schemas should be added before routing other image workflows here.
 - test restart and retry behavior without interrupting the always-loaded GTX
   broker;
 - record the exact model/projector profile whenever a benchmark is run.
+
+The deterministic handler tests now cover unsupported file content, symlinks,
+oversized images, malformed/fenced/non-object responses, receipt validation, and
+the opt-in general image-description schema. Those tests do not start or query
+the P40.
+
+The feature branch also includes
+`scripts/switch-p40-model`, a guarded host command for the broker's
+`GTX_P40_MODEL_SWITCH_COMMAND` boundary. It stops only the P40 systemd service
+for vision, checks the recorded temporary PID before stopping it, waits for
+health, and restores the normal Qwen3.5 coding service. It was syntax-tested,
+dry-run tested, and used for a final live yoghurt smoke test on compute01; the
+normal coding service was restored afterwards.

@@ -19,6 +19,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from PIL import Image, UnidentifiedImageError
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +104,23 @@ class VisionHandler(TaskHandler):
     """
 
     SUPPORTED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
-    DEFAULT_PROMPT = """Extract this image into JSON with exactly these keys:
+    RECEIPT_SCHEMA = "receipt"
+    IMAGE_DESCRIPTION_SCHEMA = "image_description"
+
+    RECEIPT_PROMPT = """Extract this receipt image into JSON with exactly these keys:
 merchant, date, currency, totals, line_items.
 Use totals as an object with subtotal, vat, total, and savings numeric values or null.
 Use line_items as an array of objects with description, quantity, and price.
 Do not infer quantities. Treat discounts and savings as line items only when visibly
 shown, with negative prices when appropriate. Return JSON only."""
+    IMAGE_DESCRIPTION_PROMPT = """Describe this image as JSON with exactly these keys:
+description, objects, text, confidence.
+Use description for a concise literal description. Use objects as an array of objects
+with label and attributes. Use text as an array of text strings that are visibly
+present. Use confidence as a number from 0 to 1, or null when uncertain. Do not
+invent details and return JSON only."""
+    DEFAULT_PROMPT = RECEIPT_PROMPT
+    SUPPORTED_SCHEMAS = {RECEIPT_SCHEMA, IMAGE_DESCRIPTION_SCHEMA}
 
     def __init__(self, endpoint: Optional[str] = None, model: Optional[str] = None,
                  timeout: Optional[float] = None, max_image_bytes: int = 25 * 1024 * 1024):
@@ -150,12 +163,16 @@ shown, with negative prices when appropriate. Return JSON only."""
         if not valid:
             logger.error("Vision task %s rejected: %s", task.get("id"), error)
             return HandlerResult.FAILED
+        payload = task.get("payload") or {}
+        schema = self._schema_for_payload(payload)
+        if schema is None:
+            logger.error("Vision task %s requested an unsupported output schema", task.get("id"))
+            return HandlerResult.FAILED
         if not self._model_available():
             logger.warning("Vision model unavailable at %s", self.endpoint)
             return HandlerResult.WORKER_UNAVAILABLE
 
-        payload = task.get("payload") or {}
-        prompt = payload.get("prompt", self.DEFAULT_PROMPT)
+        prompt = payload.get("prompt") or self._prompt_for_schema(schema)
         try:
             raw = self._call_endpoint(image_path, prompt)
             result = self._parse_output(raw)
@@ -166,11 +183,13 @@ shown, with negative prices when appropriate. Return JSON only."""
             logger.error("Vision output was invalid: %s", exc)
             return HandlerResult.FAILED
 
-        valid, error = self.validate_output(result)
+        valid, error = self.validate_output(result, schema=schema)
         if not valid:
             logger.error("Vision output failed validation: %s", error)
             return HandlerResult.FAILED
         self.last_result = result
+        if payload.get("requires_review") is True:
+            return HandlerResult.AWAITING_REVIEW
         return HandlerResult.SUCCESS
 
     @staticmethod
@@ -197,7 +216,25 @@ shown, with negative prices when appropriate. Return JSON only."""
         mime, _ = mimetypes.guess_type(image_path.name)
         if mime not in self.SUPPORTED_MIME_TYPES:
             return False, f"unsupported image type: {mime or 'unknown'}"
+        try:
+            with Image.open(image_path) as image:
+                image.verify()
+        except (OSError, UnidentifiedImageError):
+            return False, "image content is unreadable"
         return True, ""
+
+    @classmethod
+    def _schema_for_payload(cls, payload: Dict[str, Any]) -> Optional[str]:
+        schema = payload.get("schema", payload.get("output_schema", cls.RECEIPT_SCHEMA))
+        if not isinstance(schema, str) or schema not in cls.SUPPORTED_SCHEMAS:
+            return None
+        return schema
+
+    @classmethod
+    def _prompt_for_schema(cls, schema: str) -> str:
+        if schema == cls.IMAGE_DESCRIPTION_SCHEMA:
+            return cls.IMAGE_DESCRIPTION_PROMPT
+        return cls.RECEIPT_PROMPT
 
     def _model_available(self) -> bool:
         request = Request(f"{self.endpoint}/models", method="GET")
@@ -269,7 +306,9 @@ shown, with negative prices when appropriate. Return JSON only."""
             raise ValueError("vision response must be an object")
         return value
 
-    def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    def validate_output(
+        self, output: Dict[str, Any], *, schema: str = RECEIPT_SCHEMA
+    ) -> tuple[bool, Optional[str]]:
         """Validate vision output.
 
         Args:
@@ -278,6 +317,11 @@ shown, with negative prices when appropriate. Return JSON only."""
         Returns:
             Tuple of (is_valid, error_message)
         """
+        if schema == self.IMAGE_DESCRIPTION_SCHEMA:
+            return self._validate_image_description(output)
+        if schema != self.RECEIPT_SCHEMA:
+            return False, f"unsupported output schema: {schema}"
+
         required = {"merchant", "date", "currency", "totals", "line_items"}
         missing = required - output.keys()
         if missing:
@@ -306,6 +350,36 @@ shown, with negative prices when appropriate. Return JSON only."""
                 value = item.get(name)
                 if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
                     return False, f"line_items[{index}].{name} must be numeric or null"
+        return True, None
+
+    @staticmethod
+    def _validate_image_description(output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        required = {"description", "objects", "text", "confidence"}
+        missing = required - output.keys()
+        if missing:
+            return False, f"missing fields: {sorted(missing)}"
+        if not isinstance(output["description"], str) or not output["description"].strip():
+            return False, "description must be a non-empty string"
+        for field in ("objects", "text"):
+            if not isinstance(output[field], list):
+                return False, f"{field} must be an array"
+        for index, item in enumerate(output["objects"]):
+            if not isinstance(item, dict) or not isinstance(item.get("label"), str):
+                return False, f"objects[{index}] needs a label"
+            if not item["label"].strip():
+                return False, f"objects[{index}].label must be non-empty"
+            if "attributes" in item and not isinstance(item["attributes"], dict):
+                return False, f"objects[{index}].attributes must be an object"
+        if any(not isinstance(item, str) for item in output["text"]):
+            return False, "text entries must be strings"
+        confidence = output["confidence"]
+        if confidence is not None and (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            return False, "confidence must be a number from 0 to 1 or null"
         return True, None
 
 

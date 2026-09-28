@@ -1,6 +1,7 @@
 """Scheduler daemon: dispatch tasks to handlers with proper state machine flow."""
 
 import logging
+from contextlib import nullcontext
 import os
 import signal
 import time
@@ -9,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
+from gtx_broker.scheduler.model_profiles import ModelProfileError, P40ModelProfileController
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class SchedulerDaemon:
         """
         self.scheduler = Scheduler(config)
         self.storage = self.scheduler._storage
+        self.model_profiles = P40ModelProfileController()
         self.retention_days = self._configured_retention_days()
         self._active_tasks: Dict[str, bool] = {}
         self._running = False
@@ -315,8 +318,26 @@ class SchedulerDaemon:
                     task_id, error="No handler found for task kind"
                 )
 
-            # Execute the handler (blocking call - runs on existing event loop)
-            result = handler.execute(task)
+            # Execute the handler under a temporary P40 profile when an
+            # explicit switch command is configured. GTX tasks never enter
+            # this boundary.
+            worker = self.scheduler._worker_registry.get_worker(worker_name)
+            model_profile = (
+                worker.model_profile
+                if worker and worker.exclusive_resource == "p40"
+                else None
+            )
+            profile_context = (
+                self.model_profiles.profile(model_profile)
+                if model_profile
+                else nullcontext()
+            )
+            try:
+                with profile_context:
+                    result = handler.execute(task)
+            except ModelProfileError as exc:
+                logger.error("P40 model profile boundary failed for %s: %s", task_id, exc)
+                result = HandlerResult.RETRY
 
             # Step 4: Transition to final state based on result
             if result == HandlerResult.SUCCESS:
@@ -372,8 +393,13 @@ class SchedulerDaemon:
 
             elif result == HandlerResult.AWAITING_REVIEW:
                 # Task needs review
+                handler_result = getattr(handler, "last_result", None)
+                review_result = {
+                    "status": "awaiting_review",
+                    "vision_result": handler_result if isinstance(handler_result, dict) else None,
+                }
                 storage_ready = not storage_claimed or self._complete_staged_input(
-                    task_id, {"status": "awaiting_review"}, "awaiting_review"
+                    task_id, review_result, "awaiting_review"
                 )
                 if not storage_ready:
                     logger.error("Leaving review task %s running for storage recovery", task_id)

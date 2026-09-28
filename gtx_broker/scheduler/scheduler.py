@@ -52,7 +52,7 @@ class Scheduler:
         "succeeded": [],
         "failed_terminal": [],
         "retry_wait": ["queued"],
-        "awaiting_review": ["queued", "failed_terminal"],
+        "awaiting_review": ["queued", "succeeded", "failed_terminal"],
         "cancelled": [],
     }
 
@@ -642,6 +642,24 @@ class Scheduler:
         except sqlite3.OperationalError:
             return None
 
+    def get_tasks_by_state(self, state: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return durable tasks in one state for operator workflows."""
+        if not state or limit < 1:
+            return []
+        try:
+            conn = self._get_connection()
+            rows = conn.execute(
+                """SELECT * FROM tasks
+                   WHERE state = ?
+                   ORDER BY updated_at ASC, id ASC
+                   LIMIT ?""",
+                (state, limit),
+            ).fetchall()
+            conn.close()
+            return [self._row_to_dict(row) for row in rows]
+        except sqlite3.OperationalError:
+            return []
+
     def get_next_task(self) -> Optional[Dict[str, Any]]:
         """Get next task respecting policies and review priority.
         
@@ -1103,6 +1121,38 @@ class Scheduler:
             conn.close()
             return True
             
+        except sqlite3.OperationalError:
+            return False
+
+    def approve_awaiting_review(self, task_id: str) -> bool:
+        """Transition an approved review directly to succeeded."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row or row["state"] != "awaiting_review":
+                conn.close()
+                return False
+            cursor.execute(
+                """UPDATE tasks SET state = 'succeeded', updated_at = ?
+                   WHERE id = ? AND state = 'awaiting_review'""",
+                (datetime.now(timezone.utc).isoformat(), task_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                conn.close()
+                return False
+            self._emit_event(
+                task_id,
+                "task_completed",
+                from_state="awaiting_review",
+                to_state="succeeded",
+                details="result=review_approved",
+            )
+            conn.commit()
+            conn.close()
+            return True
         except sqlite3.OperationalError:
             return False
 

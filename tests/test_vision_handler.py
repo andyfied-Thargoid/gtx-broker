@@ -5,6 +5,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 import pytest
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -35,9 +36,14 @@ class FakeResponse:
         return self.payload
 
 
+def _image(path: Path, format: str = "JPEG") -> Path:
+    Image.new("RGB", (640, 480), "white").save(path, format=format)
+    return path
+
+
 def test_vision_handler_sends_image_and_parses_fenced_json(tmp_path):
     image = tmp_path / "receipt.jpg"
-    image.write_bytes(b"not-a-real-image-for-endpoint-test")
+    _image(image)
     requests = []
 
     def fake_urlopen(request, timeout):
@@ -61,7 +67,7 @@ def test_vision_handler_sends_image_and_parses_fenced_json(tmp_path):
 
 def test_vision_handler_accepts_absolute_advertised_model_path(tmp_path):
     image = tmp_path / "receipt.jpg"
-    image.write_bytes(b"image")
+    _image(image)
 
     def fake_urlopen(request, timeout):
         if request.full_url.endswith("/models"):
@@ -77,7 +83,7 @@ def test_vision_handler_accepts_absolute_advertised_model_path(tmp_path):
 
 def test_vision_handler_reports_unavailable_without_endpoint(tmp_path):
     image = tmp_path / "receipt.jpg"
-    image.write_bytes(b"image")
+    _image(image)
     handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
 
     with patch("gtx_broker.scheduler.handlers.urlopen", side_effect=URLError("offline")):
@@ -96,7 +102,7 @@ def test_vision_handler_reports_unavailable_without_endpoint(tmp_path):
 )
 def test_vision_handler_rejects_invalid_structured_output(tmp_path, bad_result):
     image = tmp_path / "receipt.jpg"
-    image.write_bytes(b"image")
+    _image(image)
     handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
 
     def fake_urlopen(request, timeout):
@@ -109,3 +115,96 @@ def test_vision_handler_rejects_invalid_structured_output(tmp_path, bad_result):
 
     assert result is HandlerResult.FAILED
     assert handler.last_result is None
+
+
+def test_vision_handler_supports_explicit_general_image_schema(tmp_path):
+    image = _image(tmp_path / "flowers.jpg")
+    result_payload = {
+        "description": "A vase of flowers on a table.",
+        "objects": [{"label": "flowers", "attributes": {"color": "mixed"}}],
+        "text": [],
+        "confidence": 0.91,
+    }
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return FakeResponse({"data": [{"id": "vision.gguf"}]})
+        body = json.loads(request.data)
+        assert "description, objects, text, confidence" in body["messages"][0]["content"][0]["text"]
+        return FakeResponse({"choices": [{"message": {"content": json.dumps(result_payload)}}]})
+
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen", side_effect=fake_urlopen):
+        result = handler.execute({
+            "kind": "vision",
+            "payload": {"image_path": str(image), "schema": "image_description"},
+        })
+
+    assert result is HandlerResult.SUCCESS
+    assert handler.last_result == result_payload
+
+
+def test_vision_handler_holds_valid_receipt_for_review(tmp_path):
+    image = _image(tmp_path / "receipt.jpg")
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return FakeResponse({"data": [{"id": "vision.gguf"}]})
+        return FakeResponse({"choices": [{"message": {"content": json.dumps(VALID_RESULT)}}]})
+
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen", side_effect=fake_urlopen):
+        result = handler.execute({
+            "kind": "vision",
+            "payload": {"image_path": str(image), "requires_review": True},
+        })
+
+    assert result is HandlerResult.AWAITING_REVIEW
+    assert handler.last_result == VALID_RESULT
+
+
+FENCE = chr(96) * 3
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["", "not json", FENCE + "json\nnot json\n" + FENCE, FENCE + "json\n[]\n" + FENCE],
+)
+def test_vision_handler_rejects_malformed_or_non_object_responses(raw):
+    with pytest.raises(ValueError):
+        VisionHandler._parse_output(raw)
+
+
+def test_vision_handler_rejects_unknown_schema_without_calling_endpoint(tmp_path):
+    image = _image(tmp_path / "flowers.jpg")
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen") as urlopen:
+        result = handler.execute({
+            "kind": "vision",
+            "payload": {"image_path": str(image), "schema": "unknown"},
+        })
+    assert result is HandlerResult.FAILED
+    urlopen.assert_not_called()
+
+
+def test_vision_handler_rejects_unreadable_image(tmp_path):
+    image = tmp_path / "fake.jpg"
+    image.write_bytes(b"not an image")
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen") as urlopen:
+        result = handler.execute({"kind": "vision", "payload": {"image_path": str(image)}})
+    assert result is HandlerResult.FAILED
+    urlopen.assert_not_called()
+
+
+def test_vision_handler_rejects_symlink_and_oversized_images(tmp_path):
+    image = _image(tmp_path / "real.jpg")
+    link = tmp_path / "link.jpg"
+    link.symlink_to(image)
+    handler = VisionHandler(endpoint="http://vision.test/v1", model="vision.gguf")
+    with patch("gtx_broker.scheduler.handlers.urlopen") as urlopen:
+        assert handler.execute({"kind": "vision", "payload": {"image_path": str(link)}}) is HandlerResult.FAILED
+        assert VisionHandler(
+            endpoint="http://vision.test/v1", model="vision.gguf", max_image_bytes=1
+        ).execute({"kind": "vision", "payload": {"image_path": str(image)}}) is HandlerResult.FAILED
+    urlopen.assert_not_called()

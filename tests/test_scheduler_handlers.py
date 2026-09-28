@@ -62,7 +62,47 @@ def test_telegram_ingress_stages_and_enqueues_idempotently(tmp_path):
     task = scheduler.get_task(first.task_id)
     assert task["mode"] == "vision"
     assert task["schedule_type"] == "nightly"
+    assert task["payload"]["requires_review"] is True
     assert Path(task["input_path"]).is_file()
+
+
+def test_telegram_ingress_persists_explicit_general_image_schema(tmp_path):
+    source = _image(tmp_path / "flowers.jpg")
+    storage = StorageContract(tmp_path / "storage")
+    scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "storage" / "metadata" / "tasks.db")))
+    ingress = TelegramImageIngress(scheduler, storage)
+
+    result = ingress.ingest({
+        "source_path": str(source),
+        "chat_id": 12,
+        "message_id": 36,
+        "schema": "image_description",
+        "prompt": "Describe the visible scene literally.",
+    })
+
+    assert result.accepted is True
+    task = scheduler.get_task(result.task_id)
+    assert task["payload"]["schema"] == "image_description"
+    assert task["payload"]["prompt"] == "Describe the visible scene literally."
+    assert task["payload"]["requires_review"] is False
+
+
+def test_telegram_ingress_rejects_unknown_schema_before_staging(tmp_path):
+    source = _image(tmp_path / "flowers.jpg")
+    storage = StorageContract(tmp_path / "storage")
+    scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "storage" / "metadata" / "tasks.db")))
+    ingress = TelegramImageIngress(scheduler, storage)
+
+    result = ingress.ingest({
+        "source_path": str(source),
+        "chat_id": 12,
+        "message_id": 37,
+        "schema": "not-supported",
+    })
+
+    assert result.accepted is False
+    assert "unsupported vision schema" in result.error
+    assert storage.task_ids() == []
 
 
 def test_telegram_ingress_marks_staged_file_rejected_after_quality_failure(tmp_path):

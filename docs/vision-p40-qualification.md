@@ -63,3 +63,11 @@ The deterministic handler tests now cover unsupported file content, symlinks,
 oversized images, malformed/fenced/non-object responses, receipt validation, and
 the opt-in general image-description schema. Those tests do not start or query
 the P40.
+
+The feature branch also includes
+`scripts/switch-p40-model`, a guarded host command for the broker's
+`GTX_P40_MODEL_SWITCH_COMMAND` boundary. It stops only the P40 systemd service
+for vision, checks the recorded temporary PID before stopping it, waits for
+health, and restores the normal Qwen3.5 coding service. It was syntax-tested
+and dry-run tested on compute01; it was not invoked after the qualification
+run because the P40 had already been restored.

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="$1"
+dry_run=""
+if (( $# > 1 )); then
+    dry_run="$2"
+fi
+if [[ "$profile" != "p40-coding" && "$profile" != "p40-vision" ]]; then
+    echo "usage: switch-p40-model p40-coding|p40-vision [--dry-run]" >&2
+    exit 2
+fi
+if [[ "$dry_run" != "" && "$dry_run" != "--dry-run" ]]; then
+    echo "usage: switch-p40-model p40-coding|p40-vision [--dry-run]" >&2
+    exit 2
+fi
+
+server="/home/andyfied/opt/llama.cpp/p40-b10988/bin/llama-server"
+model="/home/andyfied/models/qwen35/Qwen3.5-35B-A3B-UD-Q3_K_XL.gguf"
+mmproj="/mnt/scratch/models/qwen35-vision/Qwen3.5-35B-mmproj-F16.gguf"
+pid_file="/tmp/p40-vision.pid"
+log_file="/tmp/p40-vision-qualification.log"
+health_url="http://127.0.0.1:11436/health"
+
+if [[ "$dry_run" == "--dry-run" ]]; then
+    printf 'would switch P40 to %s\n' "$profile"
+    exit 0
+fi
+
+wait_for_port_free() {
+    for _ in $(seq 1 30); do
+        if ! ss -ltn | grep -q ':11436'; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "P40 port 11436 did not become free" >&2
+    return 1
+}
+
+wait_for_health() {
+    for _ in $(seq 1 120); do
+        if curl -fsS "$health_url" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "P40 service did not become healthy on 11436" >&2
+    return 1
+}
+
+stop_temporary_vision() {
+    if [[ ! -f "$pid_file" ]]; then
+        return 0
+    fi
+    pid="$(<"$pid_file")"
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$args" != *"llama-server"* || "$args" != *"--port 11436"* ]]; then
+        echo "refusing to kill unexpected PID recorded in $pid_file" >&2
+        return 1
+    fi
+    kill "$pid"
+    for _ in $(seq 1 30); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
+    rm -f "$pid_file"
+    wait_for_port_free
+}
+
+case "$profile" in
+    p40-vision)
+        systemctl --user stop llama-qwen35.service
+        wait_for_port_free
+        nohup "$server" \
+            --model "$model" \
+            --mmproj "$mmproj" \
+            --host 127.0.0.1 --port 11436 -c 65536 \
+            --device CUDA0 --main-gpu 0 --split-mode none -ngl 999 \
+            --reasoning off --no-reasoning-preserve \
+            >"$log_file" 2>&1 &
+        echo $! >"$pid_file"
+        wait_for_health
+        ;;
+    p40-coding)
+        stop_temporary_vision
+        systemctl --user start llama-qwen35.service
+        wait_for_health
+        ;;
+esac
+
+echo "P40 profile active: $profile"

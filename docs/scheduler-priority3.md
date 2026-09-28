@@ -46,7 +46,7 @@ touch the GTX service.
 
 Not implemented by this stage:
 
-- configuring and live-qualifying the P40 model switch command;
+- connecting `GTX_P40_MODEL_SWITCH_COMMAND` to `/home/andyfied/src/gtx-broker/scripts/switch-p40-model {profile}` in the daemon's production environment;
 - a live Air reviewer runtime;
 - a configured production coding executor;
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes

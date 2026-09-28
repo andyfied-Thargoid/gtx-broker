@@ -347,12 +347,15 @@ class TestWorkerStatusPersistence:
 
         # Mark p40-coding as BUSY
         registry.update_status("p40-coding", WorkerStatus.BUSY)
+
+        # Mark slow-coder as BUSY
+        registry.update_status("slow-coder", WorkerStatus.BUSY)
         
         # Mark gtx-chat as MAINTENANCE  
         registry.update_status("gtx-chat", WorkerStatus.MAINTENANCE)
 
         # select_worker should only return available workers
-        # p40-coding is BUSY, gtx-chat is MAINTENANCE
+        # p40-coding and slow-coder are BUSY, gtx-chat is MAINTENANCE
         # p40-vision is AVAILABLE by default and has capability "vision"
         available = registry.select_worker("vision")
         assert available is not None
@@ -361,7 +364,7 @@ class TestWorkerStatusPersistence:
 
         # Verify BUSY workers are not returned
         busy_attempt = registry.select_worker("text")
-        # p40-coding is BUSY, so no text-capable worker is available
+        # p40-coding and slow-coder are BUSY, so no text-capable worker is available
         assert busy_attempt is None, \
             "select_worker should return None when no workers are available"
 
@@ -371,6 +374,9 @@ class TestWorkerStatusPersistence:
             if worker.profile == "p40-coding":
                 assert worker.status == WorkerStatus.BUSY, \
                     "get_all_workers() should return persisted BUSY status"
+            elif worker.profile == "slow-coder":
+                assert worker.status == WorkerStatus.BUSY, \
+                    "get_all_workers() should return persisted slow-coder BUSY status"
             elif worker.profile == "gtx-chat":
                 assert worker.status == WorkerStatus.MAINTENANCE, \
                     "get_all_workers() should return persisted MAINTENANCE status"

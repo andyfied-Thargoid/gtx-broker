@@ -3,6 +3,7 @@
 Defines worker profiles from the scheduler architecture:
 - p40-coding: endpoint 11436, text/code tasks
 - p40-vision: endpoint 11436, vision tasks (requires projector)
+- slow-coder: endpoint 11437, CPU/RAM batch coding tasks
 - gtx-chat: endpoint 11438, conversation/brokering only
 - external-provider: only when explicitly requested
 """
@@ -343,6 +344,16 @@ DEFAULT_WORKERS = [
         exclusive_resource="p40",  # Shared P40 GPU with p40-coding
         context_limit=65536,
         model_profile="p40-vision-qwen35",
+    ),
+    WorkerProfile(
+        profile="slow-coder",
+        endpoint="127.0.0.1:11437/v1",
+        capability="text,code,coding,maintenance",
+        status=WorkerStatus.AVAILABLE,
+        exclusive_resource="slow-coder",
+        max_concurrent=1,
+        context_limit=65536,
+        model_profile="slow-coder",
     ),
     WorkerProfile(
         profile="gtx-chat",

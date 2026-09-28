@@ -444,3 +444,13 @@ class SchedulerDaemon:
             # Clean up active tasks tracking
             if task_id in self._active_tasks:
                 del self._active_tasks[task_id]
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("GTX_BROKER_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    SchedulerDaemon(SchedulerConfig()).run(
+        poll_interval=float(os.getenv("GTX_BROKER_POLL_INTERVAL", "5"))
+    )

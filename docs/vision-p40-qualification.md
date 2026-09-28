@@ -35,6 +35,11 @@ throughout.
 | Flowers, bed | image_description | success | 10.93 s | Accurate flower-bed, benches, path, and visible text description. |
 | Flowers, home | image_description | success | 11.76 s | Accurate garden/house description and visible text. |
 
+The guarded profile-switch smoke test measured approximately 6 seconds from
+the coding service stop to healthy vision service, and 9 seconds to stop vision
+and restore the healthy coding service. These are service-switch timings, not
+model inference timings.
+
 These runs used the broker's live validation path and did not alter GTX. The
 receipt was correctly held for human review rather than treated as unattended
 financial extraction.
@@ -68,6 +73,6 @@ The feature branch also includes
 `scripts/switch-p40-model`, a guarded host command for the broker's
 `GTX_P40_MODEL_SWITCH_COMMAND` boundary. It stops only the P40 systemd service
 for vision, checks the recorded temporary PID before stopping it, waits for
-health, and restores the normal Qwen3.5 coding service. It was syntax-tested
-and dry-run tested on compute01; it was not invoked after the qualification
-run because the P40 had already been restored.
+health, and restores the normal Qwen3.5 coding service. It was syntax-tested,
+dry-run tested, and used for a final live yoghurt smoke test on compute01; the
+normal coding service was restored afterwards.

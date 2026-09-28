@@ -41,19 +41,19 @@ The follow-on integration stage is included in the same branch:
 
 P40-backed tasks are preferred within the eligible queue. The policy still
 keeps image work ahead of ordinary batch work during 00:00-06:00, and general
-conversation remains a GTX task. The scheduler does not switch models or
-touch the GTX service.
+conversation remains a GTX task. When
+`GTX_P40_MODEL_SWITCH_COMMAND` is configured, the daemon may switch only the
+P40 profile and restores the configured default after each task. It never
+switches or touches the GTX service.
 
 Not implemented by this stage:
 
-- connecting `GTX_P40_MODEL_SWITCH_COMMAND` to `/home/andyfied/src/gtx-broker/scripts/switch-p40-model {profile}` in the daemon's production environment;
+- enabling the guarded switch command in the daemon's production environment;
 - a live Air reviewer runtime;
 - a configured production coding executor;
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes
   checkout documents the optional hook);
 - a Telegram-facing review acknowledgement/approval adapter;
 - live Air/Coder-Next services;
-- general image-description schemas: the current vision handler remains
-  receipt-specific until separate prompts and validation are added.
 
 Those remain separate stages with their own worker and integration tests.

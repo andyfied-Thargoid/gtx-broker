@@ -352,7 +352,7 @@ DEFAULT_WORKERS = [
         status=WorkerStatus.AVAILABLE,
         exclusive_resource="slow-coder",
         max_concurrent=1,
-        context_limit=131072,
+        context_limit=65536,
         model_profile="slow-coder",
     ),
     WorkerProfile(

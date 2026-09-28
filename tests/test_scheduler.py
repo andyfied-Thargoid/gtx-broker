@@ -348,8 +348,11 @@ class TestWorkerStatusPersistence:
         # Mark p40-coding as BUSY
         registry.update_status("p40-coding", WorkerStatus.BUSY)
         
-        # Mark gtx-chat as MAINTENANCE  
+        # Mark gtx-chat as MAINTENANCE
         registry.update_status("gtx-chat", WorkerStatus.MAINTENANCE)
+        # The slow coder is also text-capable; make the negative assertion
+        # cover every text worker rather than relying on P40 being alone.
+        registry.update_status("slow-coder", WorkerStatus.MAINTENANCE)
 
         # select_worker should only return available workers
         # p40-coding is BUSY, gtx-chat is MAINTENANCE
@@ -361,7 +364,8 @@ class TestWorkerStatusPersistence:
 
         # Verify BUSY workers are not returned
         busy_attempt = registry.select_worker("text")
-        # p40-coding is BUSY, so no text-capable worker is available
+        # p40-coding and slow-coder are unavailable, so no text-capable worker
+        # is available.
         assert busy_attempt is None, \
             "select_worker should return None when no workers are available"
 

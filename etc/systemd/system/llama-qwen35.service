@@ -1,0 +1,16 @@
+[Unit]
+Description=llama.cpp Qwen3.5 server (P40)
+After=network.target
+
+[Service]
+Type=simple
+User=andyfied
+Group=andyfied
+WorkingDirectory=/home/andyfied/src/gtx-broker
+ExecStart=/home/andyfied/src/gtx-broker/scripts/p40-profile-launcher qwen35-coding
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

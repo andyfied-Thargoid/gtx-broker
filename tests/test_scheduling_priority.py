@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import subprocess
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +12,7 @@ from gtx_broker.scheduler import (  # noqa: E402
     Scheduler,
     SchedulerConfig,
 )
+from gtx_broker.scheduler.handlers import CodingHandler, HandlerResult
 
 
 def make_scheduler(tmp_path):
@@ -101,3 +103,57 @@ def test_epoch_barrier_and_review_evidence_are_durable(tmp_path):
     epoch = epochs.get_epoch("epoch-1")
     assert epoch["review_triggered"] == 1
     assert '"findings": []' in epoch["review_result"]
+
+
+def test_nightly_coding_selects_slow_coder(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler.add_task(
+        "nightly-coding",
+        "coding",
+        {},
+        "batch",
+        priority=100,
+        idempotency_key="nightly-coding",
+        schedule_type="nightly",
+    )
+
+    task = scheduler.get_task("nightly-coding")
+    assert scheduler.select_worker_for_task(task) == "slow-coder"
+
+
+def test_maintenance_coding_selects_slow_coder(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler.add_task(
+        "maintenance-coding",
+        "coding",
+        {"mode": "maintenance"},
+        "maintenance",
+        priority=100,
+        idempotency_key="maintenance-coding",
+    )
+
+    task = scheduler.get_task("maintenance-coding")
+    assert scheduler.select_worker_for_task(task) == "slow-coder"
+
+
+def test_p40_timeout_default_is_1800(monkeypatch, tmp_path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    task = {
+        "kind": "coding",
+        "payload": {
+            "worktree_path": str(worktree),
+            "executor_command": [sys.executable, "-c", "pass"],
+            "require_commit": False,
+            "allow_no_change": True,
+        },
+    }
+
+    def run_with_timeout():
+        with patch("gtx_broker.scheduler.handlers.subprocess.run", return_value=completed) as run:
+            assert CodingHandler().execute(task) is HandlerResult.SUCCESS
+            return run.call_args_list[1].kwargs["timeout"]
+
+    monkeypatch.delenv("P40_CODING_TIMEOUT", raising=False)
+    assert run_with_timeout() == 1800.0

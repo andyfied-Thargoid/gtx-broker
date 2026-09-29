@@ -47,9 +47,9 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
 
-        if self.path.startswith("/status/"):
+        if parsed.path.startswith("/status/"):
             # Get single task status
-            task_id = self.path.split("/")[-1]
+            task_id = urllib.parse.unquote(parsed.path[len("/status/"):])
             self._handle_task_status(task_id)
         elif parsed.path == "/queue":
             # Get queue statistics or position

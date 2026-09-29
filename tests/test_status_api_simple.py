@@ -13,6 +13,7 @@ from threading import Thread
 import uuid
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
+from gtx_broker.daemon import SchedulerDaemon
 from gtx_broker.status_api import StatusAPI
 
 
@@ -66,6 +67,16 @@ class TestStatusAPIIntegration(unittest.TestCase):
             data = json.loads(response.read().decode("utf-8"))
             self.assertEqual(data["task_id"], self.task_id)
             self.assertEqual(data["state"], "queued")
+
+    def test_status_endpoint_ignores_query_string(self):
+        """Task IDs must come from the path, not from the complete request target."""
+        req = urllib.request.Request(
+            f"{self.base_url}/status/{self.task_id}?details=1"
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["task_id"], self.task_id)
 
     def test_cancel_queued_task(self):
         """Test POST /cancel works on queued tasks."""
@@ -176,3 +187,15 @@ class TestStatusAPIIntegration(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as context:
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(context.exception.code, 404)
+
+
+def test_status_api_port_configuration(monkeypatch):
+    """The daemon accepts a valid port and falls back safely for bad values."""
+    monkeypatch.setenv("GTX_STATUS_API_PORT", "12345")
+    assert SchedulerDaemon._configured_status_api_port() == 12345
+
+    monkeypatch.setenv("GTX_STATUS_API_PORT", "not-a-port")
+    assert SchedulerDaemon._configured_status_api_port() == 11439
+
+    monkeypatch.setenv("GTX_STATUS_API_PORT", "65536")
+    assert SchedulerDaemon._configured_status_api_port() == 11439

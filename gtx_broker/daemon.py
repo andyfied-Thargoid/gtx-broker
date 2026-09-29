@@ -86,6 +86,19 @@ class SchedulerDaemon:
             return 30
         return days
 
+    @staticmethod
+    def _configured_status_api_port() -> int:
+        raw = os.getenv("GTX_STATUS_API_PORT", "11439")
+        try:
+            port = int(raw)
+        except ValueError:
+            logger.warning("Invalid GTX_STATUS_API_PORT=%r; using 11439", raw)
+            return 11439
+        if not 1 <= port <= 65535:
+            logger.warning("GTX_STATUS_API_PORT=%r is outside 1-65535; using 11439", raw)
+            return 11439
+        return port
+
     def _run_retention_cleanup(self) -> None:
         try:
             removed = self.storage.cleanup_old_tasks(self.retention_days)
@@ -510,5 +523,6 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     SchedulerDaemon(SchedulerConfig()).run(
-        poll_interval=float(os.getenv("GTX_BROKER_POLL_INTERVAL", "5"))
+        poll_interval=float(os.getenv("GTX_BROKER_POLL_INTERVAL", "5")),
+        api_port=SchedulerDaemon._configured_status_api_port(),
     )

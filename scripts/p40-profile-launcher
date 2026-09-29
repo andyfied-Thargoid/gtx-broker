@@ -44,4 +44,4 @@ echo "[INFO] Launching llama-server for profile: $PROFILE_NAME"
 echo "[INFO] Model: $MODEL_PATH"
 [[ -n "${MMPROJ_PATH:-}" ]] && echo "[INFO] Projector: $MMPROJ_PATH"
 
-exec /home/andyfied/.local/bin/llama-server "${BASE_ARGS[@]}"
+exec /home/andyfied/opt/llama.cpp/p40-b10988/llama-server "${BASE_ARGS[@]}"

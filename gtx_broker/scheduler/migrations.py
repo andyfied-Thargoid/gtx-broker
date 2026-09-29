@@ -1,134 +1,89 @@
-"""Database migration runner for scheduler."""
+"""Migration scripts for gtx-broker database schema and data updates."""
 
 import sqlite3
-import logging
 from pathlib import Path
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+
+def migrate_worker_model_profiles(db_path: Path) -> int:
+    """Migrate old model_profile values to new canonical names.
+    
+    This is a data migration for workers created before the model_profile
+    naming convention was standardized. It updates the model_profile field
+    for specific worker profiles without touching other fields.
+    
+    Args:
+        db_path: Path to SQLite database
+        
+    Returns:
+        Number of rows updated
+    """
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    
+    updated = 0
+    
+    # Migrate p40-coding from old names to qwen35-coding
+    cursor.execute("""
+        UPDATE workers
+        SET model_profile = 'qwen35-coding'
+        WHERE profile = 'p40-coding'
+        AND model_profile IN ('p40-coding', 'p40-qwen35-coding', 'qwen35-coding-old')
+    """)
+    updated += cursor.rowcount
+    if cursor.rowcount > 0:
+        print(f"Updated {cursor.rowcount} p40-coding workers to qwen35-coding")
+    
+    # Migrate p40-vision from old names to qwen35-vision
+    cursor.execute("""
+        UPDATE workers
+        SET model_profile = 'qwen35-vision'
+        WHERE profile = 'p40-vision'
+        AND model_profile IN ('p40-vision-qwen35', 'p40-vision', 'qwen35-vision-old')
+    """)
+    updated += cursor.rowcount
+    if cursor.rowcount > 0:
+        print(f"Updated {cursor.rowcount} p40-vision workers to qwen35-vision")
+    
+    conn.commit()
+    conn.close()
+    
+    return updated
 
 
-class MigrationRunner:
-    """Handles database migrations for the scheduler."""
-
-    def __init__(self, db_path: str):
-        """Initialize migration runner.
-
-        Args:
-            db_path: Path to SQLite database
-        """
-        self.db_path = db_path
-        self._migrations = [
-            "001_add_tagging",
-            "002_review_worker",
-            # Add more migrations here as needed
-        ]
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection."""
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _get_applied_migrations(self) -> set:
-        """Get list of applied migrations."""
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='schema_migrations'
-            """)
-            if cursor.fetchone():
-                cursor.execute("SELECT migration_name FROM schema_migrations")
-                migrations = {row[0] for row in cursor.fetchall()}
-                conn.close()
-                return migrations
-            conn.close()
-        except sqlite3.OperationalError:
-            pass
-        return set()
-
-    def _ensure_migrations_table(self):
-        """Create schema_migrations table if it doesn't exist."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                migration_name TEXT PRIMARY KEY,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-    def run_migration(self, migration_name: str) -> bool:
-        """Run a single migration.
-
-        Args:
-            migration_name: Name of migration file (without .sql extension)
-            
-        Returns:
-            True if migration applied successfully, False on error
-        """
-        migrations_dir = Path(__file__).parent / "migrations"
-        migration_path = migrations_dir / f"{migration_name}.sql"
-
-        if not migration_path.exists():
-            # Check with .sql extension
-            migration_path_with_ext = migrations_dir / f"{migration_name}.sql"
-            if not migration_path_with_ext.exists():
-                logger.error(f"Migration file not found: {migration_path}")
-                return False
-            migration_path = migration_path_with_ext
-
-        conn = None
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Execute each statement separately (SQLite limitation)
-            with open(migration_path, 'r') as f:
-                sql = f.read()
-            
-            for statement in sql.split(';'):
-                statement = statement.strip()
-                if statement:
-                    cursor.execute(statement)
-            
-            cursor.execute(
-                "INSERT INTO schema_migrations (migration_name) VALUES (?)",
-                (migration_name,)
-            )
-            conn.commit()
-
-            logger.info(f"Applied migration: {migration_name}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to apply migration {migration_name}: {e}")
-            return False
-        finally:
-            if conn is not None:
-                conn.close()
-
-    def run_all(self) -> bool:
-        """Run all pending migrations.
-
-        Returns:
-            True if all migrations applied successfully
-        """
-        # Ensure migrations table exists
-        self._ensure_migrations_table()
-
-        # Get applied migrations
-        applied = self._get_applied_migrations()
-
-        # Apply pending migrations
-        success = True
-        for migration_name in self._migrations:
-            if migration_name not in applied:
-                if not self.run_migration(migration_name):
-                    success = False
-                    break
-
-        return success
+def migrate_worker_model_profiles_safe(db_path: Path, dry_run: bool = False) -> int:
+    """Migrate worker model profiles with logging.
+    
+    Args:
+        db_path: Path to SQLite database
+        dry_run: If True, only log what would be updated
+        
+    Returns:
+        Number of rows that would be updated
+    """
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    
+    updated = 0
+    
+    # Check existing values
+    cursor.execute("""
+        SELECT profile, model_profile 
+        FROM workers 
+        WHERE model_profile IN ('p40-coding', 'p40-vision-qwen35', 'p40-vision', 'p40-qwen35-coding')
+    """)
+    old_values = cursor.fetchall()
+    
+    if old_values:
+        print(f"Found {len(old_values)} workers with old model_profile values:")
+        for profile, mp in old_values:
+            print(f"  {profile}: {mp}")
+    
+    if dry_run:
+        return len(old_values)
+    
+    # Perform migration
+    updated += migrate_worker_model_profiles(db_path)
+    
+    conn.close()
+    return updated

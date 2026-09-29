@@ -85,11 +85,6 @@ MMPROJ_TYPE=bf16
         
         active_config.symlink_to(profiles_dir / "qwen35-vision.conf")
         
-        # Create mock llama-server script
-        mock_llama_server = tmp_path / "mock-llama-server"
-        mock_llama_server.write_text("#!/bin/bash\necho \"Args: $@\" > /tmp/launcher_args.txt\n")
-        mock_llama_server.chmod(0o755)
-        
         # Create mock launcher
         mock_launcher = tmp_path / "mock-launcher"
         mock_launcher.write_text(f"""#!/bin/bash
@@ -107,8 +102,8 @@ echo "Args: --model $MODEL_PATH --mmproj $MMPROJ_PATH" > /tmp/launcher_args.txt
         with open("/tmp/launcher_args.txt") as f:
             args = f.read()
         
-        # Verify vision args include mmproj
-        assert "qwen35-vision" in str(active_config)
+        # Verify vision args include mmproj and correct profile path
+        assert "qwen35-vision.conf" in str(active_config.resolve())
         assert "--mmproj" in args
         assert "/path/to/mmproj.mmproj" in args
 
@@ -164,11 +159,13 @@ MMPROJ_TYPE=bf16
                         assert result is True
                         assert controller.current_profile == "qwen35-vision"
                         
-                        # Verify wrapper was called
+                        # Verify wrapper was called with sudo -n
                         subprocess.run.assert_called_once()
                         call_args = subprocess.run.call_args
-                        assert call_args[0][0][0] == "/usr/local/sbin/compute01-maint/p40-switch-profile"
-                        assert call_args[0][0][1] == "qwen35-vision"
+                        assert call_args[0][0][0] == "sudo"
+                        assert call_args[0][0][1] == "-n"
+                        assert call_args[0][0][2] == "/usr/local/sbin/compute01-maint/p40-switch-profile"
+                        assert call_args[0][0][3] == "qwen35-vision"
 
 
 class TestVisionSmokeTestWithKnownAnswer:
@@ -193,7 +190,7 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response = MagicMock()
             mock_response.__enter__.return_value = mock_response
             mock_response.__exit__.return_value = False
-            mock_response.read.return_value = str(response_json).encode()
+            mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
             result = controller._run_smoke_test("qwen35-vision")
@@ -217,7 +214,7 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response = MagicMock()
             mock_response.__enter__.return_value = mock_response
             mock_response.__exit__.return_value = False
-            mock_response.read.return_value = str(response_json).encode()
+            mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
             result = controller._run_smoke_test("qwen35-vision")

@@ -222,6 +222,10 @@ class TestSmokeTest:
         controller._profiles["qwen35-vision"] = MagicMock()
         controller._profiles["qwen35-vision"].expected_model_id = "qwen3.5-35b-vision-q2_k"
         
+        # Create a temporary test image file
+        import io
+        test_image_data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00C\x00"
+        
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_response = MagicMock()
             mock_response.__enter__.return_value = mock_response
@@ -231,7 +235,8 @@ class TestSmokeTest:
             }).encode()
             mock_urlopen.return_value = mock_response
             
-            with patch("os.path.exists", return_value=True):
+            # Patch open() to return our test image data
+            with patch("builtins.open", return_value=io.BytesIO(test_image_data)):
                 result = controller._run_smoke_test("qwen35-vision")
                 assert result is True
 

@@ -12,15 +12,23 @@ from gtx_broker.daemon import SchedulerDaemon
 
 @pytest.fixture
 def daemon(tmp_path):
-    """Create daemon with temp database."""
+    """Create daemon with temp database and mock profile controller."""
     db_path = tmp_path / "tasks.db"
     config = SchedulerConfig(
         db_path=str(db_path),
         max_concurrent=1,
         poll_interval=1.0
     )
-    daemon = SchedulerDaemon(config)
-    return daemon
+    
+    # Patch the profile controller to avoid loading /etc/llama-cpp/profiles
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(config)
+        yield daemon
 
 
 class TestDaemonStateMachine:

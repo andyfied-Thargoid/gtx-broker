@@ -379,6 +379,9 @@ DEFAULT_WORKERS = [
 ]
 
 
+from gtx_broker.scheduler.migrations import migrate_worker_model_profiles_safe
+
+
 def initialize_workers(db_path: Path):
     """Initialize default worker profiles.
 
@@ -386,6 +389,9 @@ def initialize_workers(db_path: Path):
         db_path: Path to SQLite database
     """
     registry = WorkerRegistry(db_path)
+
+    # Run data migration for old model_profile values
+    migrate_worker_model_profiles_safe(db_path)
 
     for worker in DEFAULT_WORKERS:
         # Use INSERT only, not REPLACE, to preserve existing status

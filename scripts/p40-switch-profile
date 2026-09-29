@@ -80,17 +80,17 @@ restart_service() {
 
 check_health() {
     log_info "Checking health endpoint: http://${HOST}:${PORT}/health"
-    local wait_count=0
-    local max_wait=120
-    while [[ $wait_count -lt $max_wait ]]; do
+    local max_attempts=60
+    local attempt=0
+    while [[ $attempt -lt $max_attempts ]]; do
         if curl -sf --max-time 5 "http://${HOST}:${PORT}/health" > /dev/null 2>&1; then
             log_info "Health check passed"
             return 0
         fi
         sleep 2
-        ((wait_count++))
+        ((attempt++))
     done
-    log_error "Health check failed after ${max_wait}s"
+    log_error "Health check failed after $((max_attempts * 2))s (60 attempts)"
     return 1
 }
 

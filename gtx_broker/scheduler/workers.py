@@ -379,25 +379,17 @@ DEFAULT_WORKERS = [
 ]
 
 
-from gtx_broker.scheduler.migration_003_model_profiles import migrate_worker_model_profiles
-
-
 def initialize_workers(db_path: Path):
     """Initialize default worker profiles.
 
     Args:
         db_path: Path to SQLite database
     """
-    from gtx_broker.scheduler.migration_003 import create_migration_tracking_table, apply_migration
+    from gtx_broker.scheduler.migrations import MigrationRunner
     
-    # Ensure migration tracking table exists
-    create_migration_tracking_table(db_path)
-    
-    # Run data migration for old model_profile values
-    def run_migration(conn):
-        migrate_worker_model_profiles(conn)
-    
-    apply_migration(db_path, 3, run_migration)
+    # Run migrations first
+    runner = MigrationRunner(str(db_path))
+    runner.run_all()
     
     registry = WorkerRegistry(db_path)
 

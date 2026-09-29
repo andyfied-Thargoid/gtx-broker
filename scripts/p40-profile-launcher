@@ -24,6 +24,7 @@ source "$CONF_FILE"
 
 BASE_ARGS=(
     "--model" "${MODEL_PATH}"
+    "--alias" "${MODEL_ID}"
     "--chat-template" "${CHAT_TEMPLATE}"
     "--n-gpu-layers" "${GPU_LAYERS}"
     "--ctx-size" "${CONTEXT_SIZE}"

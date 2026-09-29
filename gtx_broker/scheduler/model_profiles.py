@@ -48,6 +48,11 @@ class P40ModelProfileController:
     PORT = 11436
     VISION_TEST_IMAGE = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
     
+    # The wrapper allows up to 60s for service activation, 120s for health,
+    # and another 60s for the longest smoke test. Leave room for model/API
+    # startup overhead without allowing a hung switch to block indefinitely.
+    SWITCH_TIMEOUT_SECONDS = 300
+
     def __init__(self):
         self._profiles: dict[str, ProfileMetadata] = {}
         self._current_profile: Optional[str] = None
@@ -92,7 +97,7 @@ class P40ModelProfileController:
                     gpu_layers=int(profile_data.get("GPU_LAYERS", 99)),
                     context_size=int(profile_data.get("CONTEXT_SIZE", 262144)),
                     chat_template=profile_data.get("CHAT_TEMPLATE", ""),
-                    slots=int(profile_data.get("SERVER_SLOTS", 4)),
+                    slots=int(profile_data.get("SERVER_SLOTS", 1)),
                 )
                 logger.debug(f"Loaded profile: {profile_name} from {conf_file}")
             except (ValueError, KeyError) as exc:
@@ -101,7 +106,7 @@ class P40ModelProfileController:
     def _ensure_lock_dir(self) -> None:
         if not self.LOCK_DIR.exists():
             try:
-                self.LOCK_DIR.mkdir(parents=True, mode=0o770)
+                self.LOCK_DIR.mkdir(parents=True, mode=0o770, exist_ok=True)
             except OSError as exc:
                 logger.error(f"Failed to create lock directory: {exc}")
                 raise
@@ -255,8 +260,17 @@ class P40ModelProfileController:
         expected_model = self._profiles[profile_name].expected_model_id
         
         if current_model == expected_model:
-            self._current_profile = profile_name
-            return True
+            # The model ID alone does not prove that the service, health
+            # endpoint, projector (for vision), and inference path are good.
+            # Always run the same layered verification on this fast path.
+            if self._verify_profile_switch(profile_name):
+                self._current_profile = profile_name
+                return True
+            logger.warning(
+                "Active model ID matches %s but layered verification failed; "
+                "restarting through the profile switch wrapper",
+                profile_name,
+            )
         
         if not os.path.exists(self.SWITCH_WRAPPER_PATH):
             logger.error(f"Switch wrapper not found: {self.SWITCH_WRAPPER_PATH}")
@@ -265,7 +279,9 @@ class P40ModelProfileController:
         try:
             result = subprocess.run(
                 ["sudo", "-n", self.SWITCH_WRAPPER_PATH, profile_name],
-                capture_output=True, text=True, timeout=120
+                capture_output=True,
+                text=True,
+                timeout=self.SWITCH_TIMEOUT_SECONDS,
             )
             
             if result.returncode != 0:

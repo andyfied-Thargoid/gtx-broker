@@ -29,7 +29,7 @@ CHAT_TEMPLATE=qwen3.5
 QUANTIZATION=Q3_K_XL
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-ud-q3_k_xl
 """)
         
@@ -39,7 +39,7 @@ CHAT_TEMPLATE=qwen3.5-vision
 QUANTIZATION=Q2_K
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-vision-q2_k
 MMPROJ_PATH=/path/to/mmproj
 MMPROJ_TYPE=bf16
@@ -89,9 +89,11 @@ class TestEnsureProfile:
         controller._profiles["qwen35-coding"].expected_model_id = "qwen3.5-35b-ud-q3_k_xl"
         
         with patch.object(controller, '_get_current_model_id', return_value="qwen3.5-35b-ud-q3_k_xl"):
-            result = controller.ensure_profile("qwen35-coding")
+            with patch.object(controller, '_verify_profile_switch', return_value=True) as verify:
+                result = controller.ensure_profile("qwen35-coding")
             assert result is True
             assert controller.current_profile == "qwen35-coding"
+            verify.assert_called_once_with("qwen35-coding")
     
     def test_invalid_profile_returns_false(self):
         controller = P40ModelProfileController()
@@ -113,9 +115,10 @@ class TestEnsureProfile:
                     mock_result.returncode = 0
                     mock_result.stdout = "Switch completed"
                     
-                    with patch("subprocess.run", return_value=mock_result):
+                    with patch("subprocess.run", return_value=mock_result) as mock_run:
                         result = controller.ensure_profile("qwen35-coding")
                         assert result is True
+                        assert mock_run.call_args.kwargs["timeout"] == controller.SWITCH_TIMEOUT_SECONDS
     
     def test_fails_when_wrapper_not_found(self):
         controller = P40ModelProfileController()
@@ -313,7 +316,8 @@ class TestEnsureProfileUnderLease:
         controller._profiles["qwen35-coding"].expected_model_id = "qwen3.5-35b-ud-q3_k_xl"
         
         with patch.object(controller, '_get_current_model_id', return_value="qwen3.5-35b-ud-q3_k_xl"):
-            result = controller._ensure_profile_under_lease("qwen35-coding")
+            with patch.object(controller, '_verify_profile_switch', return_value=True):
+                result = controller._ensure_profile_under_lease("qwen35-coding")
             assert result is True
     
     def test_updates_current_profile_on_success(self):

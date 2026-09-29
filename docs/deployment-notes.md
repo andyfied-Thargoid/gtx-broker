@@ -53,6 +53,10 @@ sudo cp test-images/receipt_small.jpg /usr/local/share/gtx-broker/test-images/
 
 ## Profile Configuration
 
+The P40 is an exclusive broker resource, so each profile uses one server slot
+to preserve the full configured context for the task. The launcher also passes
+`MODEL_ID` as llama.cpp's API alias so `/v1/models` exposes the configured ID.
+
 Each profile has a `.conf` file in `/etc/llama-cpp/profiles/`:
 
 **Coding Profile (qwen35-coding.conf):**
@@ -62,7 +66,7 @@ CHAT_TEMPLATE=qwen3.5
 QUANTIZATION=Q3_K_XL
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-ud-q3_k_xl
 ```
 
@@ -73,7 +77,7 @@ CHAT_TEMPLATE=qwen3.5-vision
 QUANTIZATION=Q2_K
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-vision-q2_k
 MMPROJ_PATH=/mnt/scratch/models/qwen3.5/qwen3.5-vision-bf16.mmproj
 MMPROJ_TYPE=bf16

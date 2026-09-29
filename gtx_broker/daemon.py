@@ -347,10 +347,20 @@ class SchedulerDaemon:
                 if self.model_profiles.ensure_profile(model_profile):
                     # Profile switched successfully, retry task
                     logger.info("Profile remediation succeeded for %s", task_id)
-                    with self.model_profiles.profile(model_profile):
-                        result = handler.execute(task)
-                    if result == HandlerResult.FAILED:
-                        result = HandlerResult.RETRY  # Retry on second failure
+                    try:
+                        with self.model_profiles.profile(model_profile):
+                            result = handler.execute(task)
+                    except ModelProfileError as retry_exc:
+                        logger.error(
+                            "P40 model profile remediation boundary failed again "
+                            "for %s: %s",
+                            task_id,
+                            retry_exc,
+                        )
+                        result = HandlerResult.RETRY
+                    else:
+                        if result == HandlerResult.FAILED:
+                            result = HandlerResult.RETRY  # Retry on second failure
                 else:
                     logger.error("Profile remediation failed for %s", task_id)
                     result = HandlerResult.RETRY

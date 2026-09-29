@@ -28,7 +28,7 @@ CHAT_TEMPLATE=qwen3.5
 QUANTIZATION=Q3_K_XL
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-ud-q3_k_xl
 """)
         
@@ -39,7 +39,7 @@ CHAT_TEMPLATE=qwen3.5-vision
 QUANTIZATION=Q2_K
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-vision-q2_k
 MMPROJ_PATH=/path/to/mmproj.mmproj
 MMPROJ_TYPE=bf16
@@ -65,6 +65,11 @@ MMPROJ_TYPE=bf16
             expected_path = str(profiles_dir / "qwen35-vision.conf")
             assert resolved == expected_path
     
+    def test_launcher_passes_configured_model_alias(self):
+        """The launcher must expose MODEL_ID through the OpenAI API alias."""
+        launcher = Path(__file__).parents[1] / "scripts" / "p40-profile-launcher"
+        assert '"--alias" "${MODEL_ID}"' in launcher.read_text()
+
     def test_launcher_executes_with_vision_args(self, tmp_path):
         """Integration test: launcher resolves symlink and generates correct arguments."""
         active_config = tmp_path / "p40-active.conf"
@@ -78,7 +83,7 @@ CHAT_TEMPLATE=qwen3.5-vision
 QUANTIZATION=Q2_K
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-vision-q2_k
 MMPROJ_PATH=/path/to/mmproj.mmproj
 MMPROJ_TYPE=bf16
@@ -123,7 +128,7 @@ CHAT_TEMPLATE=qwen3.5
 QUANTIZATION=Q3_K_XL
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-ud-q3_k_xl
 """)
         
@@ -132,7 +137,7 @@ MODEL_PATH=/path/to/vision.gguf
 CHAT_TEMPLATE=qwen3.5-vision
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
-SERVER_SLOTS=4
+SERVER_SLOTS=1
 MODEL_ID=qwen3.5-35b-vision-q2_k
 MMPROJ_PATH=/path/to/mmproj.mmproj
 MMPROJ_TYPE=bf16

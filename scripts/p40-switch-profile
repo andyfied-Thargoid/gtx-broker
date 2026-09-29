@@ -20,6 +20,9 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
+PREVIOUS_CONFIG=""
+PREVIOUS_PROFILE=""
+
 validate_profile() {
     local profile="$1"
     if [[ -z "$profile" ]]; then
@@ -51,7 +54,7 @@ update_active_config() {
     mv -T "$temp_symlink" "$ACTIVE_CONFIG"
     if [[ "$(readlink -f "$ACTIVE_CONFIG")" != "$target_config" ]]; then
         log_error "Failed to update active config symlink"
-        exit 1
+        return 1
     fi
     log_info "Active config updated successfully"
 }
@@ -61,8 +64,8 @@ restart_service() {
     log_info "Restarting $service"
     if ! systemctl restart "$service"; then
         log_error "Failed to restart $service"
-        systemctl status "$service" --no-pager -l
-        exit 1
+        systemctl status "$service" --no-pager -l || true
+        return 1
     fi
     log_info "Waiting for $service to become active..."
     local wait_count=0
@@ -75,7 +78,7 @@ restart_service() {
         ((wait_count++))
     done
     log_error "Service $service did not become active within 60s"
-    exit 1
+    return 1
 }
 
 check_health() {
@@ -177,21 +180,82 @@ run_smoke_test() {
     log_info "Smoke test passed"
 }
 
+rollback_previous_profile() {
+    log_warn "Attempting rollback to previous known-good profile: $PREVIOUS_PROFILE"
+    if ! update_active_config "$PREVIOUS_PROFILE"; then
+        return 1
+    fi
+    if ! restart_service "$SERVICE_NAME"; then
+        return 1
+    fi
+    if ! check_health "$HOST" "$PORT"; then
+        return 1
+    fi
+    local previous_model_id
+    previous_model_id=$(grep "^MODEL_ID=" "$PROFILES_DIR/${PREVIOUS_PROFILE}.conf" 2>/dev/null | cut -d= -f2 || true)
+    if [[ -z "$previous_model_id" ]]; then
+        log_error "Could not extract previous MODEL_ID during rollback"
+        return 1
+    fi
+    if ! verify_model "$HOST" "$PORT" "$previous_model_id"; then
+        return 1
+    fi
+    verify_slots "$HOST" "$PORT"
+    if ! run_smoke_test "$HOST" "$PORT" "$PREVIOUS_PROFILE"; then
+        return 1
+    fi
+    log_info "Rollback succeeded: $PREVIOUS_PROFILE"
+    return 0
+}
+
+fail_after_switch() {
+    local reason="$1"
+    log_error "$reason"
+    if [[ -n "$PREVIOUS_PROFILE" ]]; then
+        if ! rollback_previous_profile; then
+            log_error "Rollback failed; manual P40 recovery is required"
+        fi
+    else
+        log_error "No previous profile was available for rollback"
+    fi
+    exit 1
+}
 main() {
     log_info "P40 profile switch started"
     validate_profile "$PROFILE_NAME"
-    update_active_config "$PROFILE_NAME"
-    restart_service "$SERVICE_NAME"
-    check_health "$HOST" "$PORT"
-    local expected_model_id
-    expected_model_id=$(grep "^MODEL_ID=" "$ACTIVE_CONFIG" 2>/dev/null | cut -d= -f2)
-    if [[ -z "$expected_model_id" ]]; then
-        log_error "Could not extract MODEL_ID from active config"
-        exit 1
+
+    if [[ -L "$ACTIVE_CONFIG" ]]; then
+        PREVIOUS_CONFIG=$(readlink -f "$ACTIVE_CONFIG" || true)
+        if [[ -n "$PREVIOUS_CONFIG" && -f "$PREVIOUS_CONFIG" ]]; then
+            PREVIOUS_PROFILE=$(basename "$PREVIOUS_CONFIG" .conf)
+            if [[ ! -f "$PROFILES_DIR/${PREVIOUS_PROFILE}.conf" ]]; then
+                PREVIOUS_PROFILE=""
+            fi
+        fi
     fi
-    verify_model "$HOST" "$PORT" "$expected_model_id"
+
+    if ! update_active_config "$PROFILE_NAME"; then
+        fail_after_switch "Failed to update active profile configuration"
+    fi
+    if ! restart_service "$SERVICE_NAME"; then
+        fail_after_switch "Failed to restart service for profile $PROFILE_NAME"
+    fi
+    if ! check_health "$HOST" "$PORT"; then
+        fail_after_switch "Health check failed for profile $PROFILE_NAME"
+    fi
+
+    local expected_model_id
+    expected_model_id=$(grep "^MODEL_ID=" "$ACTIVE_CONFIG" 2>/dev/null | cut -d= -f2 || true)
+    if [[ -z "$expected_model_id" ]]; then
+        fail_after_switch "Could not extract MODEL_ID from active config"
+    fi
+    if ! verify_model "$HOST" "$PORT" "$expected_model_id"; then
+        fail_after_switch "Model verification failed for profile $PROFILE_NAME"
+    fi
     verify_slots "$HOST" "$PORT"
-    run_smoke_test "$HOST" "$PORT" "$PROFILE_NAME"
+    if ! run_smoke_test "$HOST" "$PORT" "$PROFILE_NAME"; then
+        fail_after_switch "Smoke test failed for profile $PROFILE_NAME"
+    fi
     log_info "P40 profile switch completed successfully: $PROFILE_NAME"
 }
 

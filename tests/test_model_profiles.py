@@ -129,7 +129,7 @@ class TestEnsureProfile:
         controller._profiles["qwen35-coding"] = MagicMock()
         
         with patch("os.path.exists", return_value=True):
-            with patch("subprocess.run", side_effect=Exception("timeout")):
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["test"], timeout=10)):
                 result = controller.ensure_profile("qwen35-coding")
                 assert result is False
     
@@ -143,8 +143,10 @@ class TestEnsureProfile:
         ]):
             with patch.object(controller, '_verify_profile_switch', return_value=False):
                 with patch("os.path.exists", return_value=True):
-                    result = controller.ensure_profile("qwen35-coding")
-                    assert result is False
+                    # Mock subprocess.run to avoid calling real switch script
+                    with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                        result = controller.ensure_profile("qwen35-coding")
+                        assert result is False
 
 
 class TestLayeredVerification:

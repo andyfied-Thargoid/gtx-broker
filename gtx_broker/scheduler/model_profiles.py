@@ -46,6 +46,7 @@ class P40ModelProfileController:
     SERVICE_NAME = "llama-qwen35.service"
     HOST = "127.0.0.1"
     PORT = 11436
+    VISION_TEST_IMAGE = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
     
     def __init__(self):
         self._profiles: dict[str, ProfileMetadata] = {}
@@ -173,8 +174,8 @@ class P40ModelProfileController:
         
         profile = self._profiles[profile_name]
         
+        test_image = self.VISION_TEST_IMAGE
         if "vision" in profile_name:
-            test_image = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
             if not os.path.exists(test_image):
                 logger.error("Vision test image not found: %s", test_image)
                 return False
@@ -184,7 +185,7 @@ class P40ModelProfileController:
             import base64
             
             if "vision" in profile_name:
-                test_image = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
+                test_image = self.VISION_TEST_IMAGE
                 with open(test_image, "rb") as f:
                     image_data = base64.b64encode(f.read()).decode("utf-8")
                 message = {
@@ -193,7 +194,7 @@ class P40ModelProfileController:
                         "role": "user",
                         "content": [
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
-                            {"type": "text", "text": "Extract the total amount from this receipt. Reply with exactly: 29.24"}
+                            {"type": "text", "text": "What is the total amount shown on this receipt? Reply with the amount only."}
                         ]
                     }],
                     "max_tokens": 16,
@@ -219,7 +220,7 @@ class P40ModelProfileController:
                 if "choices" in result and len(result["choices"]) > 0:
                     content = result["choices"][0].get("message", {}).get("content", "")
                     if "vision" in profile_name:
-                        return "29.24" in content
+                        return content.strip() == "29.24"
                     return "OK" in content
         except Exception:
             pass

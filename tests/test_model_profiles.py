@@ -231,14 +231,15 @@ class TestSmokeTest:
             mock_response.__enter__.return_value = mock_response
             mock_response.__exit__.return_value = False
             mock_response.read.return_value = json.dumps({
-                "choices": [{"message": {"content": "The total amount is 29.24 from the receipt."}}]
+                "choices": [{"message": {"content": "29.24"}}]
             }).encode()
             mock_urlopen.return_value = mock_response
             
-            # Patch open() to return our test image data
-            with patch("builtins.open", return_value=io.BytesIO(test_image_data)):
-                result = controller._run_smoke_test("qwen35-vision")
-                assert result is True
+            # Patch both exists() and open() to inject test image
+            with patch("os.path.exists", return_value=True):
+                with patch("builtins.open", return_value=io.BytesIO(test_image_data)):
+                    result = controller._run_smoke_test("qwen35-vision")
+                    assert result is True
 
 
 class TestLeaseManagement:

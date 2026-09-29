@@ -1,5 +1,6 @@
 """Integration test for profile switching with systemd/launcher."""
 
+import json
 import os
 import subprocess
 import tempfile
@@ -119,6 +120,7 @@ class TestProfileControllerWithActiveConfig:
         (profiles_dir / "qwen35-coding.conf").write_text("""
 MODEL_PATH=/path/to/coding.gguf
 CHAT_TEMPLATE=qwen3.5
+QUANTIZATION=Q3_K_XL
 GPU_LAYERS=99
 CONTEXT_SIZE=262144
 SERVER_SLOTS=4
@@ -181,7 +183,7 @@ class TestVisionSmokeTestWithKnownAnswer:
         response_json = {
             "choices": [{
                 "message": {
-                    "content": "The total amount is 29.24 from the receipt."
+                    "content": "29.24"
                 }
             }]
         }
@@ -193,19 +195,21 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
-            result = controller._run_smoke_test("qwen35-vision")
-            assert result is True
+            with patch("os.path.exists", return_value=True):
+                result = controller._run_smoke_test("qwen35-vision")
+                assert result is True
     
     def test_vision_smoke_test_rejects_wrong_answer(self):
         """Vision smoke test fails if response doesn't contain 29.24."""
         controller = P40ModelProfileController()
         controller._profiles["qwen35-vision"] = MagicMock()
+        controller._profiles["qwen35-vision"].expected_model_id = "qwen3.5-35b-vision-q2_k"
         
         # Simulate API response with wrong answer
         response_json = {
             "choices": [{
                 "message": {
-                    "content": "The total is 15.50"
+                    "content": "15.50"
                 }
             }]
         }
@@ -217,5 +221,6 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
-            result = controller._run_smoke_test("qwen35-vision")
-            assert result is False
+            with patch("os.path.exists", return_value=True):
+                result = controller._run_smoke_test("qwen35-vision")
+                assert result is False

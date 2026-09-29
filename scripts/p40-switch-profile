@@ -80,12 +80,18 @@ restart_service() {
 
 check_health() {
     log_info "Checking health endpoint: http://${HOST}:${PORT}/health"
-    if ! curl -sf --max-time 10 "http://${HOST}:${PORT}/health" > /dev/null 2>&1; then
-        log_error "Health check failed"
-        return 1
-    fi
-    log_info "Health check passed"
-    return 0
+    local wait_count=0
+    local max_wait=120
+    while [[ $wait_count -lt $max_wait ]]; do
+        if curl -sf --max-time 5 "http://${HOST}:${PORT}/health" > /dev/null 2>&1; then
+            log_info "Health check passed"
+            return 0
+        fi
+        sleep 2
+        ((wait_count++))
+    done
+    log_error "Health check failed after ${max_wait}s"
+    return 1
 }
 
 verify_model() {
@@ -135,13 +141,13 @@ run_smoke_test() {
         local response
         response=$(curl -sf --max-time 60 -X POST "http://${host}:${port}/v1/chat/completions" \
             -H "Content-Type: application/json" \
-            -d "{\"model\": \"$model_id\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,$image_data\"}}, {\"type\": \"text\", \"text\": \"Extract the total amount from this receipt. Reply with exactly: 29.24\"}]}], \"max_tokens\": 16, \"temperature\": 0}" 2>/dev/null) || {
+            -d "{\"model\": \"$model_id\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,$image_data\"}}, {\"type\": \"text\", \"text\": \"What is the total amount shown on this receipt? Reply with the amount only.\"}]}], \"max_tokens\": 16, \"temperature\": 0}" 2>/dev/null) || {
             log_error "Multimodal smoke test request failed"
             return 1
         }
         if echo "$response" | python3 -c "import sys, json; data=json.load(sys.stdin); 
         content=data.get('choices',[{}])[0].get('message',{}).get('content',''); 
-        sys.exit(0 if '29.24' in content else 1)" 2>/dev/null; then
+        sys.exit(0 if content.strip()=='29.24' else 1)" 2>/dev/null; then
             log_info "Multimodal smoke test passed"
             return 0
         else

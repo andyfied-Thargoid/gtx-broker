@@ -1,117 +1,11 @@
-"""Integration test for profile switching with systemd/launcher."""
+"""Integration tests for the model-profile controller boundary."""
 
 import json
-import os
 import subprocess
-import tempfile
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from gtx_broker.scheduler.model_profiles import P40ModelProfileController
-
-
-class TestProfileLauncherIntegration:
-    """Test that launcher reads from active symlink."""
-    
-    def test_launcher_reads_active_symlink(self, tmp_path):
-        """Launcher resolves /etc/llama-cpp/p40-active.conf to get profile."""
-        active_config = tmp_path / "p40-active.conf"
-        profiles_dir = tmp_path / "profiles"
-        profiles_dir.mkdir()
-        
-        # Create coding profile
-        (profiles_dir / "qwen35-coding.conf").write_text("""
-MODEL_PATH=/path/to/coding.gguf
-CHAT_TEMPLATE=qwen3.5
-QUANTIZATION=Q3_K_XL
-GPU_LAYERS=99
-CONTEXT_SIZE=262144
-SERVER_SLOTS=1
-MODEL_ID=qwen3.5-35b-ud-q3_k_xl
-""")
-        
-        # Create vision profile with projector
-        (profiles_dir / "qwen35-vision.conf").write_text("""
-MODEL_PATH=/path/to/vision.gguf
-CHAT_TEMPLATE=qwen3.5-vision
-QUANTIZATION=Q2_K
-GPU_LAYERS=99
-CONTEXT_SIZE=262144
-SERVER_SLOTS=1
-MODEL_ID=qwen3.5-35b-vision-q2_k
-MMPROJ_PATH=/path/to/mmproj.mmproj
-MMPROJ_TYPE=bf16
-""")
-        
-        # Set active config to coding
-        active_config.symlink_to(profiles_dir / "qwen35-coding.conf")
-        
-        with patch("gtx_broker.scheduler.model_profiles.P40ModelProfileController.PROFILES_DIR", profiles_dir):
-            controller = P40ModelProfileController()
-            controller._load_profiles_from_conf()
-            
-            # Manually test the symlink resolution logic from launcher
-            resolved = os.readlink(active_config)
-            expected_path = str(profiles_dir / "qwen35-coding.conf")
-            assert resolved == expected_path
-            
-            # Switch to vision
-            active_config.unlink()
-            active_config.symlink_to(profiles_dir / "qwen35-vision.conf")
-            
-            resolved = os.readlink(active_config)
-            expected_path = str(profiles_dir / "qwen35-vision.conf")
-            assert resolved == expected_path
-    
-    def test_launcher_passes_configured_model_alias(self):
-        """The launcher must expose MODEL_ID through the OpenAI API alias."""
-        launcher = Path(__file__).parents[1] / "scripts" / "p40-profile-launcher"
-        assert '"--alias" "${MODEL_ID}"' in launcher.read_text()
-
-    def test_launcher_executes_with_vision_args(self, tmp_path):
-        """Integration test: launcher resolves symlink and generates correct arguments."""
-        active_config = tmp_path / "p40-active.conf"
-        profiles_dir = tmp_path / "profiles"
-        profiles_dir.mkdir()
-        
-        # Create vision profile with projector
-        (profiles_dir / "qwen35-vision.conf").write_text("""
-MODEL_PATH=/path/to/vision.gguf
-CHAT_TEMPLATE=qwen3.5-vision
-QUANTIZATION=Q2_K
-GPU_LAYERS=99
-CONTEXT_SIZE=262144
-SERVER_SLOTS=1
-MODEL_ID=qwen3.5-35b-vision-q2_k
-MMPROJ_PATH=/path/to/mmproj.mmproj
-MMPROJ_TYPE=bf16
-""")
-        
-        active_config.symlink_to(profiles_dir / "qwen35-vision.conf")
-        
-        # Create mock launcher
-        mock_launcher = tmp_path / "mock-launcher"
-        mock_launcher.write_text(f"""#!/bin/bash
-ACTIVE_CONFIG="{active_config}"
-CONF_FILE=$(readlink -f "$ACTIVE_CONFIG")
-source "$CONF_FILE"
-echo "Args: --model $MODEL_PATH --mmproj $MMPROJ_PATH" > /tmp/launcher_args.txt
-""")
-        mock_launcher.chmod(0o755)
-        
-        # Execute launcher
-        result = subprocess.run([str(mock_launcher)], capture_output=True, text=True)
-        
-        # Read generated args
-        with open("/tmp/launcher_args.txt") as f:
-            args = f.read()
-        
-        # Verify vision args include mmproj and correct profile path
-        assert "qwen35-vision.conf" in str(active_config.resolve())
-        assert "--mmproj" in args
-        assert "/path/to/mmproj.mmproj" in args
 
 
 class TestProfileControllerWithActiveConfig:

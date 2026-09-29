@@ -38,15 +38,21 @@ class ProfileMetadata:
 class P40ModelProfileController:
     """Full Model-Profile Controller for P40 runtime profile management."""
     
-    SWITCH_WRAPPER_PATH = "/usr/local/sbin/compute01-maint/p40-switch-profile"
-    PROFILES_DIR = Path("/etc/llama-cpp/profiles")
-    ACTIVE_CONFIG = Path("/etc/llama-cpp/p40-active.conf")
+    SWITCH_WRAPPER_PATH = os.getenv(
+        "GTX_BROKER_P40_SWITCH_WRAPPER",
+        "/usr/local/sbin/compute01-maint/p40-switch-profile",
+    )
+    PROFILES_DIR = Path(os.getenv("GTX_BROKER_P40_PROFILES_DIR", "/etc/llama-cpp/profiles"))
+    ACTIVE_CONFIG = Path(os.getenv("GTX_BROKER_P40_ACTIVE_CONFIG", "/etc/llama-cpp/p40-active.conf"))
     LOCK_DIR = Path("/run/lock/gtx-broker")
     LOCK_FILE = LOCK_DIR / "p40-profile.lock"
-    SERVICE_NAME = "llama-qwen35.service"
+    SERVICE_NAME = os.getenv("GTX_BROKER_P40_SERVICE", "llama-qwen35.service")
     HOST = "127.0.0.1"
     PORT = 11436
-    VISION_TEST_IMAGE = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
+    VISION_TEST_IMAGE = os.getenv(
+        "GTX_BROKER_P40_TEST_IMAGE",
+        "/usr/local/share/gtx-broker/test-images/receipt_small.jpg",
+    )
     
     # The wrapper allows up to 60s for service activation, 120s for health,
     # and another 60s for the longest smoke test. Leave room for model/API
@@ -158,7 +164,7 @@ class P40ModelProfileController:
     def _check_service_active(self) -> bool:
         try:
             result = subprocess.run(
-                ["systemctl", "is-active", "--quiet", self.SERVICE_NAME],
+                ["systemctl", "--user", "is-active", "--quiet", self.SERVICE_NAME],
                 capture_output=True, timeout=10
             )
             return result.returncode == 0

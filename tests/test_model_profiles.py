@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import tempfile
 from unittest.mock import patch, MagicMock
 
@@ -211,9 +212,28 @@ class TestSmokeTest:
                 "choices": [{"message": {"content": "OK"}}]
             }).encode()
             mock_urlopen.return_value = mock_response
-            
+        
             result = controller._run_smoke_test("qwen35-vision")
             assert result is False
+    
+    def test_vision_smoke_test_success_with_known_answer(self):
+        """Vision smoke test succeeds when response contains 29.24 and image exists."""
+        controller = P40ModelProfileController()
+        controller._profiles["qwen35-vision"] = MagicMock()
+        controller._profiles["qwen35-vision"].expected_model_id = "qwen3.5-35b-vision-q2_k"
+        
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = MagicMock()
+            mock_response.__enter__.return_value = mock_response
+            mock_response.__exit__.return_value = False
+            mock_response.read.return_value = json.dumps({
+                "choices": [{"message": {"content": "The total amount is 29.24 from the receipt."}}]
+            }).encode()
+            mock_urlopen.return_value = mock_response
+            
+            with patch("os.path.exists", return_value=True):
+                result = controller._run_smoke_test("qwen35-vision")
+                assert result is True
 
 
 class TestLeaseManagement:

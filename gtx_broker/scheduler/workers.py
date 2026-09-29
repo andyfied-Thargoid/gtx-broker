@@ -334,7 +334,7 @@ DEFAULT_WORKERS = [
         status=WorkerStatus.AVAILABLE,
         exclusive_resource="p40",  # Shared P40 GPU with p40-vision
         context_limit=262144,
-        model_profile="p40-coding",
+        model_profile="qwen35-coding",
     ),
     WorkerProfile(
         profile="p40-vision",
@@ -343,7 +343,7 @@ DEFAULT_WORKERS = [
         status=WorkerStatus.AVAILABLE,
         exclusive_resource="p40",  # Shared P40 GPU with p40-coding
         context_limit=65536,
-        model_profile="p40-vision-qwen35",
+        model_profile="qwen35-vision",
     ),
     WorkerProfile(
         profile="slow-coder",

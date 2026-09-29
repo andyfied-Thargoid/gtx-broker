@@ -63,6 +63,54 @@ MMPROJ_TYPE=bf16
             resolved = os.readlink(active_config)
             expected_path = str(profiles_dir / "qwen35-vision.conf")
             assert resolved == expected_path
+    
+    def test_launcher_executes_with_vision_args(self, tmp_path):
+        """Integration test: launcher resolves symlink and generates correct arguments."""
+        active_config = tmp_path / "p40-active.conf"
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        
+        # Create vision profile with projector
+        (profiles_dir / "qwen35-vision.conf").write_text("""
+MODEL_PATH=/path/to/vision.gguf
+CHAT_TEMPLATE=qwen3.5-vision
+QUANTIZATION=Q2_K
+GPU_LAYERS=99
+CONTEXT_SIZE=262144
+SERVER_SLOTS=4
+MODEL_ID=qwen3.5-35b-vision-q2_k
+MMPROJ_PATH=/path/to/mmproj.mmproj
+MMPROJ_TYPE=bf16
+""")
+        
+        active_config.symlink_to(profiles_dir / "qwen35-vision.conf")
+        
+        # Create mock llama-server script
+        mock_llama_server = tmp_path / "mock-llama-server"
+        mock_llama_server.write_text("#!/bin/bash\necho \"Args: $@\" > /tmp/launcher_args.txt\n")
+        mock_llama_server.chmod(0o755)
+        
+        # Create mock launcher
+        mock_launcher = tmp_path / "mock-launcher"
+        mock_launcher.write_text(f"""#!/bin/bash
+ACTIVE_CONFIG="{active_config}"
+CONF_FILE=$(readlink -f "$ACTIVE_CONFIG")
+source "$CONF_FILE"
+echo "Args: --model $MODEL_PATH --mmproj $MMPROJ_PATH" > /tmp/launcher_args.txt
+""")
+        mock_launcher.chmod(0o755)
+        
+        # Execute launcher
+        result = subprocess.run([str(mock_launcher)], capture_output=True, text=True)
+        
+        # Read generated args
+        with open("/tmp/launcher_args.txt") as f:
+            args = f.read()
+        
+        # Verify vision args include mmproj
+        assert "qwen35-vision" in str(active_config)
+        assert "--mmproj" in args
+        assert "/path/to/mmproj.mmproj" in args
 
 
 class TestProfileControllerWithActiveConfig:

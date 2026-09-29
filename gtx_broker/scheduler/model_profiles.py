@@ -263,7 +263,7 @@ class P40ModelProfileController:
         
         try:
             result = subprocess.run(
-                [self.SWITCH_WRAPPER_PATH, profile_name],
+                ["sudo", "-n", self.SWITCH_WRAPPER_PATH, profile_name],
                 capture_output=True, text=True, timeout=120
             )
             

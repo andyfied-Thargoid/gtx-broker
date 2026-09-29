@@ -105,15 +105,28 @@ assert controller.ensure_profile("qwen35-vision")
 
 ## WRONG_MODEL_LOADED Handler
 
-Wire up the alert handler to call `ensure_profile()`:
+The daemon implements automatic WRONG_MODEL_LOADED remediation:
 
 ```python
-# In daemon or alert handler
-@task_handler
-def handle_wrong_model_loaded(task):
-    controller = P40ModelProfileController()
-    if controller.ensure_profile(task.expected_profile):
-        task.retry(reason="Profile switched successfully")
+# In daemon.py, _dispatch_task()
+except ModelProfileError as exc:
+    logger.error("P40 model profile boundary failed for %s: %s", task_id, exc)
+    # WRONG_MODEL_LOADED remediation: retry once more after ensuring profile
+    logger.info("Attempting WRONG_MODEL_LOADED remediation for %s", task_id)
+    if self.model_profiles.ensure_profile(model_profile):
+        # Profile switched successfully, retry task
+        logger.info("Profile remediation succeeded for %s", task_id)
+        with self.model_profiles.profile(model_profile):
+            result = handler.execute(task)
+        if result == HandlerResult.FAILED:
+            result = HandlerResult.RETRY  # Retry on second failure
     else:
-        task.fail(reason="Failed to switch profile")
+        logger.error("Profile remediation failed for %s", task_id)
+        result = HandlerResult.RETRY
 ```
+
+The handler:
+1. Catches `ModelProfileError` (profile switch/verification failure)
+2. Calls `ensure_profile()` to remediate WRONG_MODEL_LOADED
+3. Retries task execution under corrected profile
+4. Falls back to RETRY if remediation fails

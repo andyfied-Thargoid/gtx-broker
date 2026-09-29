@@ -334,7 +334,7 @@ DEFAULT_WORKERS = [
         status=WorkerStatus.AVAILABLE,
         exclusive_resource="p40",  # Shared P40 GPU with p40-vision
         context_limit=262144,
-        model_profile="p40-coding",
+        model_profile="qwen35-coding",
     ),
     WorkerProfile(
         profile="p40-vision",
@@ -343,7 +343,7 @@ DEFAULT_WORKERS = [
         status=WorkerStatus.AVAILABLE,
         exclusive_resource="p40",  # Shared P40 GPU with p40-coding
         context_limit=65536,
-        model_profile="p40-vision-qwen35",
+        model_profile="qwen35-vision",
     ),
     WorkerProfile(
         profile="slow-coder",
@@ -385,6 +385,12 @@ def initialize_workers(db_path: Path):
     Args:
         db_path: Path to SQLite database
     """
+    from gtx_broker.scheduler.migrations import MigrationRunner
+    
+    # Run migrations first
+    runner = MigrationRunner(str(db_path))
+    runner.run_all()
+    
     registry = WorkerRegistry(db_path)
 
     for worker in DEFAULT_WORKERS:

@@ -20,6 +20,7 @@ class MigrationRunner:
         self._migrations = [
             "001_add_tagging",
             "002_review_worker",
+            "003_worker_model_profiles",
             # Add more migrations here as needed
         ]
 

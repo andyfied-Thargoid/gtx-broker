@@ -7,20 +7,29 @@ from unittest.mock import MagicMock, patch
 
 from gtx_broker.scheduler import SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult
+from gtx_broker.scheduler.model_profiles import ModelProfileError
 from gtx_broker.daemon import SchedulerDaemon
 
 
 @pytest.fixture
 def daemon(tmp_path):
-    """Create daemon with temp database."""
+    """Create daemon with temp database and mock profile controller."""
     db_path = tmp_path / "tasks.db"
     config = SchedulerConfig(
         db_path=str(db_path),
         max_concurrent=1,
         poll_interval=1.0
     )
-    daemon = SchedulerDaemon(config)
-    return daemon
+    
+    # Patch the profile controller to avoid loading /etc/llama-cpp/profiles
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(config)
+        yield daemon
 
 
 class TestDaemonStateMachine:
@@ -117,6 +126,34 @@ class TestDaemonStateMachine:
                 # Verify task requeued to retry_wait
                 task_data = daemon.scheduler.get_task(task['id'])
                 assert task_data['state'] == 'retry_wait'
+
+    def test_profile_remediation_boundary_failure_requeues(self, daemon):
+        """A second profile-boundary failure must return the task to retry_wait."""
+        success = daemon.scheduler.add_task(
+            task_id="TEST-003B",
+            kind="coding",
+            payload={"goal": "test"},
+            mode="immediate",
+            priority=10,
+        )
+        assert success
+
+        initial_context = MagicMock()
+        initial_context.__enter__.side_effect = ModelProfileError("initial boundary")
+        retry_context = MagicMock()
+        retry_context.__enter__.side_effect = ModelProfileError("retry boundary")
+        daemon.model_profiles.profile.side_effect = [initial_context, retry_context]
+        daemon.model_profiles.ensure_profile.return_value = True
+
+        with patch.object(daemon, '_get_worker_for_task', return_value='p40-coding'):
+            with patch('gtx_broker.daemon.get_handler_for_task') as mock_get_handler:
+                mock_get_handler.return_value = MagicMock()
+                task = daemon.scheduler.get_next_task()
+                assert daemon._dispatch_task(task)
+
+        task_data = daemon.scheduler.get_task(task['id'])
+        assert task_data['state'] == 'retry_wait'
+        assert daemon.model_profiles.profile.call_count == 2
 
     def test_worker_unavailable_requeues_to_retry_wait(self, daemon):
         """Test that worker unavailable requeues task to retry_wait."""

@@ -54,6 +54,6 @@ Not implemented by this stage:
 - the upstream Hermes adapter hook (the broker command is ready and the Hermes
   checkout documents the optional hook);
 - a Telegram-facing review acknowledgement/approval adapter;
-- live Air/Coder-Next services;
+- live Air Reviewer/slow coder services;
 
 Those remain separate stages with their own worker and integration tests.

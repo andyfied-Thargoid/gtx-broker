@@ -173,11 +173,20 @@ MMPROJ_TYPE=bf16
 class TestVisionSmokeTestWithKnownAnswer:
     """Test vision smoke test with known answer (29.24)."""
     
-    def test_vision_smoke_test_parses_29_24(self):
+    def test_vision_smoke_test_parses_29_24(self, tmp_path):
         """Vision smoke test correctly extracts and validates 29.24."""
         controller = P40ModelProfileController()
         controller._profiles["qwen35-vision"] = MagicMock()
         controller._profiles["qwen35-vision"].expected_model_id = "qwen3.5-35b-vision-q2_k"
+        
+        # Create a test image file
+        import io
+        test_image_data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00C\x00"
+        test_image_path = tmp_path / "receipt.jpg"
+        test_image_path.write_bytes(test_image_data)
+        
+        # Set the injectable test image path
+        controller.VISION_TEST_IMAGE = str(test_image_path)
         
         # Simulate API response with correct answer
         response_json = {
@@ -195,15 +204,22 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
-            with patch("os.path.exists", return_value=True):
-                result = controller._run_smoke_test("qwen35-vision")
-                assert result is True
+            result = controller._run_smoke_test("qwen35-vision")
+            assert result is True
     
-    def test_vision_smoke_test_rejects_wrong_answer(self):
+    def test_vision_smoke_test_rejects_wrong_answer(self, tmp_path):
         """Vision smoke test fails if response doesn't contain 29.24."""
         controller = P40ModelProfileController()
         controller._profiles["qwen35-vision"] = MagicMock()
         controller._profiles["qwen35-vision"].expected_model_id = "qwen3.5-35b-vision-q2_k"
+        
+        # Create a test image file
+        test_image_data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00C\x00"
+        test_image_path = tmp_path / "receipt.jpg"
+        test_image_path.write_bytes(test_image_data)
+        
+        # Set the injectable test image path
+        controller.VISION_TEST_IMAGE = str(test_image_path)
         
         # Simulate API response with wrong answer
         response_json = {
@@ -221,6 +237,5 @@ class TestVisionSmokeTestWithKnownAnswer:
             mock_response.read.return_value = json.dumps(response_json).encode()
             mock_urlopen.return_value = mock_response
             
-            with patch("os.path.exists", return_value=True):
-                result = controller._run_smoke_test("qwen35-vision")
-                assert result is False
+            result = controller._run_smoke_test("qwen35-vision")
+            assert result is False

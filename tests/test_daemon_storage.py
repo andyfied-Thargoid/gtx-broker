@@ -15,11 +15,35 @@ from gtx_broker.scheduler import SchedulerConfig, StorageContract
 from gtx_broker.scheduler.handlers import HandlerResult
 
 
+@pytest.fixture
+def daemon_storage(tmp_path):
+    """Create daemon with mocked profile controller for storage tests."""
+    db_path = tmp_path / "metadata" / "tasks.db"
+    config = SchedulerConfig(db_path=str(db_path))
+    
+    # Patch the profile controller to avoid loading /etc/llama-cpp/profiles
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(config)
+        yield daemon
+
+
 def test_daemon_moves_staged_input_through_processing_to_processed(tmp_path):
     storage_root = tmp_path / "storage"
     db_path = storage_root / "metadata" / "tasks.db"
-    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(db_path)))
-    storage = StorageContract(storage_root)
+    
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(SchedulerConfig(db_path=str(db_path)))
+        storage = StorageContract(storage_root)
 
     source = tmp_path / "receipt.jpg"
     Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
@@ -55,8 +79,16 @@ def test_daemon_moves_staged_input_through_processing_to_processed(tmp_path):
 
 def test_daemon_does_not_mark_scheduler_succeeded_when_storage_completion_fails(tmp_path):
     storage_root = tmp_path / "storage"
-    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
-    storage = StorageContract(storage_root)
+    
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
+        storage = StorageContract(storage_root)
+
     source = tmp_path / "receipt.jpg"
     Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
     task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="failed-storage")
@@ -81,8 +113,16 @@ def test_daemon_does_not_mark_scheduler_succeeded_when_storage_completion_fails(
 
 def test_daemon_persists_vision_result_when_review_is_required(tmp_path):
     storage_root = tmp_path / "storage"
-    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
-    storage = StorageContract(storage_root)
+    
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
+        storage = StorageContract(storage_root)
+
     source = tmp_path / "receipt.jpg"
     Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
     task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="review")
@@ -133,8 +173,17 @@ def test_requeue_repairs_directory_moved_before_metadata_update(tmp_path):
 @pytest.mark.parametrize("start_failure", [False, True])
 def test_claimed_task_waits_for_storage_requeue_before_retry(tmp_path, start_failure):
     storage_root = tmp_path / "storage"
-    daemon = SchedulerDaemon(SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db")))
-    storage = StorageContract(storage_root)
+    db_path = storage_root / "metadata" / "tasks.db"
+    
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        daemon = SchedulerDaemon(SchedulerConfig(db_path=str(db_path)))
+        storage = StorageContract(storage_root)
+
     source = tmp_path / "receipt.jpg"
     Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
     task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="no-worker")
@@ -161,9 +210,18 @@ def test_claimed_task_waits_for_storage_requeue_before_retry(tmp_path, start_fai
 
 def test_daemon_requeues_processing_input_after_restart(tmp_path):
     storage_root = tmp_path / "storage"
-    config = SchedulerConfig(db_path=str(storage_root / "metadata" / "tasks.db"))
-    daemon = SchedulerDaemon(config)
-    storage = StorageContract(storage_root)
+    db_path = storage_root / "metadata" / "tasks.db"
+    
+    with patch('gtx_broker.daemon.P40ModelProfileController') as MockController:
+        mock_controller = MagicMock()
+        mock_controller.profile.return_value = MagicMock().__enter__.return_value
+        mock_controller.ensure_profile.return_value = False
+        MockController.return_value = mock_controller
+        
+        config = SchedulerConfig(db_path=str(db_path))
+        daemon = SchedulerDaemon(config)
+        storage = StorageContract(storage_root)
+
     source = tmp_path / "receipt.jpg"
     Image.new("RGB", (640, 480), "white").save(source, format="JPEG")
     task_id, _ = storage.stage_input(source, source_chat="chat", source_message_id="2")

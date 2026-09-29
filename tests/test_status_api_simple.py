@@ -181,6 +181,29 @@ class TestStatusAPIIntegration(unittest.TestCase):
         # Verify server is stopped
         self.assertIsNone(daemon._api.server)
 
+    def test_shutdown_releases_fixed_port_for_immediate_restart(self):
+        """Shutdown must close the listening socket before a restart."""
+        port = self.port + 1
+        first = StatusAPI(self.scheduler, port=port)
+        self.assertTrue(first.start())
+        first_thread = Thread(target=first.run_forever, daemon=True)
+        first_thread.start()
+        time.sleep(0.1)
+        first.shutdown()
+        first_thread.join(timeout=2)
+        self.assertFalse(first_thread.is_alive())
+
+        second = StatusAPI(self.scheduler, port=port)
+        self.assertTrue(second.start())
+        second_thread = Thread(target=second.run_forever, daemon=True)
+        second_thread.start()
+        try:
+            time.sleep(0.1)
+        finally:
+            second.shutdown()
+            second_thread.join(timeout=2)
+        self.assertFalse(second_thread.is_alive())
+
     def test_task_not_found_status(self):
         """Test GET /status/{task_id} returns 404 for missing task."""
         req = urllib.request.Request(f"{self.base_url}/status/nonexistent")

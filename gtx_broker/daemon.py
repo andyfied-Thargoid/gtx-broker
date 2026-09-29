@@ -233,6 +233,9 @@ class SchedulerDaemon:
         finally:
             if self._api:
                 self._api.shutdown()
+            if self._api_thread and self._api_thread.is_alive():
+                self._api_thread.join(timeout=5)
+            self._api_thread = None
             logger.info("Daemon stopped")
 
     def _get_worker_for_task(self, task_or_kind: Any) -> Optional[str]:

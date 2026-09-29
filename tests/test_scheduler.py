@@ -3,6 +3,7 @@ import pytest
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
+from threading import Event, Thread
 
 # Get repository root from test file location
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -256,6 +257,58 @@ class TestRetryReviewCancel:
         scheduler.transition_running_to_awaiting_review(task_id_7)
         result = scheduler.cancel_task(task_id_7)
         assert not result, "Cannot cancel awaiting_review task (not in STATE_TRANSITIONS)"
+
+    def test_cancel_cannot_overwrite_concurrent_start(self, scheduler, monkeypatch):
+        """Cancellation must lose to a start transition holding the write lock."""
+        task_id = "task-cancel-race-001"
+        scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-cancel-race-001")
+        assert scheduler.claim_task(task_id) is not None
+
+        start_event_written = Event()
+        allow_start_commit = Event()
+        cancel_started = Event()
+        start_result = {}
+        cancel_result = {}
+
+        original_emit = scheduler._emit_event_in_transaction
+
+        def pause_after_start(cursor, event_task_id, event_type, **kwargs):
+            original_emit(cursor, event_task_id, event_type, **kwargs)
+            if event_task_id == task_id and event_type == "task_started":
+                start_event_written.set()
+                allow_start_commit.wait(timeout=5)
+
+        monkeypatch.setattr(scheduler, "_emit_event_in_transaction", pause_after_start)
+
+        original_cancel = scheduler.cancel_task
+
+        def cancel_with_signal(task):
+            cancel_started.set()
+            return original_cancel(task)
+
+        monkeypatch.setattr(scheduler, "cancel_task", cancel_with_signal)
+
+        starter = Thread(
+            target=lambda: start_result.setdefault(
+                "value", scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
+            )
+        )
+        canceller = Thread(
+            target=lambda: cancel_result.setdefault("value", scheduler.cancel_task(task_id))
+        )
+        starter.start()
+        assert start_event_written.wait(timeout=5)
+        canceller.start()
+        assert cancel_started.wait(timeout=5)
+        allow_start_commit.set()
+
+        starter.join(timeout=5)
+        canceller.join(timeout=5)
+        assert not starter.is_alive()
+        assert not canceller.is_alive()
+        assert start_result["value"] is True
+        assert cancel_result["value"] is False
+        assert scheduler.get_task(task_id)["state"] == "running"
 
 
 class TestDSTAndScheduling:

@@ -259,8 +259,10 @@ class StatusAPI:
     def shutdown(self):
         """Gracefully shut down the server."""
         with self._lock:
-            if self.server:
-                self.server.shutdown()
+            server = self.server
+            if server:
+                server.shutdown()
+                server.server_close()
                 self.server = None
                 self._started = False
                 logger.info("Status API server stopped")

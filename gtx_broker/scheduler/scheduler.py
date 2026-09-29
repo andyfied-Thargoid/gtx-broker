@@ -987,41 +987,50 @@ class Scheduler:
         Returns:
             True if cancelled
         """
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
-            # Get current state
+
+            # Lock the state read and transition together.  In particular, this
+            # prevents cancellation from observing ``claimed`` and then
+            # overwriting a concurrent ``claimed -> running`` transition.
+            cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
-                conn.close()
+                conn.rollback()
                 return False
-            
+
             from_state = row["state"]
-            
-            # Validate transition is legal per STATE_TRANSITIONS
-            # Only queued and claimed can transition to cancelled
-            if not self._validate_transition(task_id, from_state, "cancelled"):
-                conn.close()
-                return False
-                
             to_state = "cancelled"
+            if not self._validate_transition(task_id, from_state, to_state):
+                conn.rollback()
+                return False
+
             cursor.execute("""
                 UPDATE tasks SET state = ?, updated_at = ?
-                WHERE id = ?
-            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
-            
-            if cursor.rowcount > 0:
-                self._emit_event(task_id, "task_cancelled",
-                               from_state=from_state, to_state=to_state)
-                conn.commit()
-                
-            conn.close()
+                WHERE id = ? AND state = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(),
+                  task_id, from_state))
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+
+            self._emit_event_in_transaction(
+                cursor, task_id, "task_cancelled",
+                from_state=from_state, to_state=to_state,
+            )
+            conn.commit()
             return True
-            
-        except sqlite3.OperationalError:
+
+        except sqlite3.Error:
+            if conn is not None:
+                conn.rollback()
             return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def requeue_claimed_to_retry_wait(self, task_id: str) -> bool:
         """Transition claimed → retry_wait (for when task cannot start).

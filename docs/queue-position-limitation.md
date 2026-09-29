@@ -33,7 +33,7 @@ A task reported as position 1 by the API might not be dispatched first if:
 1. It has `schedule_type=nightly` and the current time is in the immediate window (18:00-00:00)
 2. It has `mode=queue` and there are `mode=interactive` tasks waiting
 3. Its `task_kind=vision` but the P40 is currently unavailable (model not loaded)
-4. It's in `claimed` or `running` state (excluded from queued count but not filtered by simple sort)
+4. It becomes `claimed` or `running` after the position was calculated (those states are excluded from the queued-task query)
 5. Another task has the same priority but was created earlier and passes all eligibility checks
 
 ## Design Trade-off
@@ -71,7 +71,7 @@ The queue position is documented as a **priority-based ranking**, not a guarante
 1. Poll `/queue` statistics for overall state
 2. Use `/status/{task_id}` for per-task state and events
 3. Subscribe to events (future feature) for real-time state changes
-4. Accept that position 1 is the highest-priority eligible task, but actual dispatch may differ based on scheduling windows and resource availability
+4. Accept that position 1 is the highest-priority task in the simple queued-task ranking, not necessarily the next eligible dispatch
 
 ## Future Work
 

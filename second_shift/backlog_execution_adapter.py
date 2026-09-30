@@ -427,6 +427,7 @@ class BacklogExecutionAdapter:
             "output_schema": {"passed": "boolean", "findings": ["string"], "evidence": ["string"]},
             "instruction": "Inspect the current worktree and emit only JSON matching the schema. "
             "Do not run pytest or other commands requiring writable temporary storage. "
+            "Only inspect files under the current worktree; do not search parent directories. "
             "passed must be false when findings remain.",
         }, indent=2, sort_keys=True)
         try:

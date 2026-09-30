@@ -625,7 +625,8 @@ class ReviewHandler(TaskHandler):
                     "Inspect the current worktree without making changes. "
                     "Return only JSON matching the supplied output schema. "
                     "Do not run pytest or other commands that require a "
-                    "writable temporary directory."
+                    "writable temporary directory. Only inspect files under "
+                    "the current worktree; do not search parent directories."
                 ),
             })
         try:

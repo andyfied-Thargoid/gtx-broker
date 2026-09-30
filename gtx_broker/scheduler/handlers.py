@@ -553,7 +553,7 @@ class CodingHandler(TaskHandler):
 
 
 class ReviewHandler(TaskHandler):
-    """Read-only Air reviewer command boundary.
+    """Read-only Codex reviewer boundary with Air Review failover.
 
     The reviewer receives a task manifest on stdin and must return JSON. Any
     worktree mutation is treated as a failed review and is never silently
@@ -571,19 +571,28 @@ class ReviewHandler(TaskHandler):
     def can_handle(self, task: Dict[str, Any]) -> bool:
         return task.get("kind") == "review" or bool(task.get("review_tag") or task.get("review_worker"))
 
-    def execute(self, task: Dict[str, Any]) -> HandlerResult:
-        self.last_result = None
+    def _commands(self, task: Dict[str, Any]) -> list[tuple[str, Any]]:
         payload = task.get("payload") or {}
-        worktree = payload.get("worktree_path") or payload.get("repository_path")
-        command = payload.get("review_command") or os.getenv("AIR_REVIEW_COMMAND")
-        if not worktree or not command:
-            return HandlerResult.WORKER_UNAVAILABLE
-        worktree_path = Path(str(worktree)).expanduser()
-        if not worktree_path.is_dir():
-            return HandlerResult.FAILED
+        selected = task.get("worker_profile") or task.get("review_worker")
+        if selected == "air-review":
+            return [("air-review", payload.get("air_review_command") or
+                     payload.get("review_command") or os.getenv("AIR_REVIEW_COMMAND"))]
+        return [
+            ("codex-review", payload.get("codex_review_command") or
+             payload.get("review_command") or os.getenv("CODEX_REVIEW_COMMAND") or
+             os.getenv("CODEX_COMMAND")),
+            ("air-review", payload.get("air_review_command") or
+             os.getenv("AIR_REVIEW_COMMAND")),
+        ]
+
+    def _execute_command(
+        self, task: Dict[str, Any], worktree_path: Path, worker: str, command: Any,
+    ) -> tuple[HandlerResult, Optional[Dict[str, Any]]]:
+        if not command:
+            return HandlerResult.WORKER_UNAVAILABLE, None
         argv = shlex.split(command) if isinstance(command, str) else list(command)
         if not argv:
-            return HandlerResult.WORKER_UNAVAILABLE
+            return HandlerResult.WORKER_UNAVAILABLE, None
         try:
             before = CodingHandler._git_status(worktree_path)
             completed = subprocess.run(
@@ -592,22 +601,42 @@ class ReviewHandler(TaskHandler):
             )
             after = CodingHandler._git_status(worktree_path)
             if before != after:
-                return HandlerResult.FAILED
+                return HandlerResult.FAILED, None
+            if completed.returncode != 0:
+                logger.warning("%s reviewer exited with status %s", worker, completed.returncode)
+                return HandlerResult.WORKER_UNAVAILABLE, None
             result = VisionHandler._parse_output(completed.stdout)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            logger.warning("Air reviewer failed: %s", exc)
-            return HandlerResult.RETRY
+            logger.warning("%s reviewer unavailable: %s", worker, exc)
+            return HandlerResult.WORKER_UNAVAILABLE, None
         except (ValueError, KeyError, TypeError) as exc:
-            logger.error("Air review output was invalid: %s", exc)
-            return HandlerResult.FAILED
-        if completed.returncode != 0:
-            return HandlerResult.FAILED
+            logger.error("%s review output was invalid: %s", worker, exc)
+            return HandlerResult.FAILED, None
         valid, error = self.validate_output(result)
         if not valid:
-            logger.error("Air review output failed validation: %s", error)
+            logger.error("%s review output failed validation: %s", worker, error)
+            return HandlerResult.FAILED, None
+        result = dict(result)
+        result["reviewer"] = worker
+        return HandlerResult.SUCCESS, result
+
+    def execute(self, task: Dict[str, Any]) -> HandlerResult:
+        self.last_result = None
+        payload = task.get("payload") or {}
+        worktree = payload.get("worktree_path") or payload.get("repository_path")
+        if not worktree:
+            return HandlerResult.WORKER_UNAVAILABLE
+        worktree_path = Path(str(worktree)).expanduser()
+        if not worktree_path.is_dir():
             return HandlerResult.FAILED
-        self.last_result = result
-        return HandlerResult.SUCCESS
+        for worker, command in self._commands(task):
+            result, output = self._execute_command(task, worktree_path, worker, command)
+            if result == HandlerResult.SUCCESS:
+                self.last_result = output
+                return result
+            if result != HandlerResult.WORKER_UNAVAILABLE:
+                return result
+        return HandlerResult.WORKER_UNAVAILABLE
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         if not isinstance(output, dict):

@@ -135,6 +135,7 @@ class BacklogExecutionAdapter:
         test_runner: TestRunner | None = None,
         self_reviewer: SelfReviewer | None = None,
         reviewer: Reviewer | None = None,
+        failover_reviewer: Reviewer | None = None,
         final_verifier: Reviewer | None = None,
         escalation_worker: Worker | None = None,
         router: Router | None = None,
@@ -154,6 +155,7 @@ class BacklogExecutionAdapter:
         self.test_runner = test_runner or self._run_repository_tests
         self.self_reviewer = self_reviewer
         self.reviewer = reviewer or self._run_codex_review
+        self.failover_reviewer = failover_reviewer or self._run_air_review
         self.final_verifier = final_verifier or self._run_codex_final_verification
         self.worktree_factory = worktree_factory or self._create_worktree
         self.worker_timeout_seconds = worker_timeout_seconds or float(
@@ -443,6 +445,81 @@ class BacklogExecutionAdapter:
     def _run_codex_review(self, request, worker_result, tests):
         return self._run_codex_gate("review", request, worker_result, tests)
 
+    @staticmethod
+    def _parse_air_review_result(output: str) -> VerificationResult:
+        try:
+            payload = json.loads(output.strip())
+        except (json.JSONDecodeError, TypeError):
+            return VerificationResult(False, ("Air Review returned non-JSON output",), "review_unavailable")
+        if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
+            return VerificationResult(False, ("Air Review JSON must contain boolean passed",), "review_unavailable")
+        evidence = payload.get("evidence", [])
+        findings = payload.get("findings", [])
+        summary = payload.get("summary")
+        required_changes = payload.get("required_changes", [])
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        if isinstance(findings, list):
+            evidence = [*evidence, *(json.dumps(item, sort_keys=True) for item in findings)]
+        if isinstance(summary, str) and summary:
+            evidence = [*evidence, summary]
+        if isinstance(required_changes, list):
+            evidence = [*evidence, *(str(item) for item in required_changes)]
+        return VerificationResult(
+            payload["passed"], tuple(str(item) for item in evidence),
+            "rejected_code" if not payload["passed"] else "approved",
+        )
+
+    def _run_air_review(self, request, worker_result, tests):
+        command = os.environ.get("AIR_REVIEW_COMMAND")
+        if not command:
+            return VerificationResult(
+                False, ("AIR_REVIEW_COMMAND is not configured; failover unavailable",),
+                "review_unavailable",
+            )
+        task = {
+            "kind": "review",
+            "payload": {
+                "worktree_path": request.worktree_path,
+                "repository_path": request.repository_path,
+                "goal": request.description,
+                "acceptance_criteria": list(request.acceptance_criteria),
+                "reported_tests": asdict(tests),
+            },
+        }
+        try:
+            completed = subprocess.run(
+                shlex.split(command), cwd=request.worktree_path,
+                capture_output=True, text=True, input=json.dumps(task),
+                timeout=self.codex_timeout_seconds, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return VerificationResult(False, (f"Air Review failover unavailable: {exc}",), "review_unavailable")
+        if completed.returncode != 0:
+            return VerificationResult(
+                False, ("Air Review failover process failed", completed.stderr[-1000:]),
+                "review_unavailable",
+            )
+        return self._parse_air_review_result(completed.stdout)
+
+    def _run_review_with_failover(self, request, worker_result, tests):
+        primary = _verification(self.reviewer(request, worker_result, tests))
+        if primary.passed or primary.failure_kind != "review_unavailable":
+            return primary
+        try:
+            fallback = _verification(self.failover_reviewer(request, worker_result, tests))
+        except Exception as exc:
+            return VerificationResult(
+                False,
+                (*primary.evidence, f"Air Review failover raised {type(exc).__name__}: {exc}"),
+                "review_unavailable",
+            )
+        return VerificationResult(
+            fallback.passed,
+            (*primary.evidence, "Codex review unavailable; Air Review failover attempted", *fallback.evidence),
+            fallback.failure_kind,
+        )
+
     def _run_codex_final_verification(self, request, worker_result, review):
         return self._run_codex_gate("final", request, worker_result, review)
 
@@ -591,7 +668,7 @@ class BacklogExecutionAdapter:
         tests = _verification(record.get("tests", {}))
         evidence = list(record.get("evidence", ()))
         try:
-            review = _verification(self.reviewer(request, worker_result, tests))
+            review = _verification(self._run_review_with_failover(request, worker_result, tests))
         except Exception as exc:
             review = self._gate_exception(exc, "review")
         evidence.extend(review.evidence)
@@ -838,7 +915,7 @@ class BacklogExecutionAdapter:
             and (request.selected_model == "codex" or worker_result.success or worker_result.classification in SUBSTANTIVE)
         )
         review = (
-            _verification(self.reviewer(request, worker_result, tests))
+            _verification(self._run_review_with_failover(request, worker_result, tests))
             if should_review
             else VerificationResult(
                 False,

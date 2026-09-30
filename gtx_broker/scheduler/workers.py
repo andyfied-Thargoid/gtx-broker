@@ -363,6 +363,14 @@ DEFAULT_WORKERS = [
         context_limit=65536,
     ),
     WorkerProfile(
+        profile="codex-review",
+        endpoint="",
+        capability="review",
+        status=WorkerStatus.UNAVAILABLE,
+        context_limit=None,
+        model_profile="codex-review",
+    ),
+    WorkerProfile(
         profile="air-review",
         endpoint="",
         capability="review",

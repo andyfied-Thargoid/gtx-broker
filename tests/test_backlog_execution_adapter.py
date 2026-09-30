@@ -41,7 +41,7 @@ def manifest(path: Path) -> Path:
     return path
 
 
-def adapter(tmp_path, worker, test_runner=None, self_reviewer=None, reviewer=None, final_verifier=None, escalation_worker=None, max_attempts=3, router=None, workflow="gtx_direct_escalation", worktree_factory=None):
+def adapter(tmp_path, worker, test_runner=None, self_reviewer=None, reviewer=None, failover_reviewer=None, final_verifier=None, escalation_worker=None, max_attempts=3, router=None, workflow="gtx_direct_escalation", worktree_factory=None):
     return BacklogExecutionAdapter(
         manifest(tmp_path / "manifest.json"),
         tmp_path / "repo",
@@ -52,6 +52,7 @@ def adapter(tmp_path, worker, test_runner=None, self_reviewer=None, reviewer=Non
         test_runner=test_runner or (lambda request: VerificationResult(True, ("tests passed",))),
         self_reviewer=self_reviewer,
         reviewer=reviewer or (lambda *args: VerificationResult(True, ("review passed",))),
+        failover_reviewer=failover_reviewer,
         final_verifier=final_verifier or (lambda *args: VerificationResult(True, ("final passed",))),
         escalation_worker=escalation_worker,
         router=router,
@@ -267,6 +268,24 @@ def test_default_codex_gates_fail_closed(tmp_path):
 
     assert outcome.status == "blocked"
     assert "CODEX_REVIEW_COMMAND is not configured" in " ".join(outcome.evidence)
+
+
+def test_air_review_is_used_only_when_codex_review_is_unavailable(tmp_path):
+    runner = adapter(
+        tmp_path,
+        lambda request: WorkerResult(True, changed_files=("implementation.py",)),
+        reviewer=lambda *args: VerificationResult(
+            False, ("Codex unavailable",), "review_unavailable"
+        ),
+        failover_reviewer=lambda *args: VerificationResult(
+            True, ("Air Review failover passed",), "approved"
+        ),
+    )
+
+    outcome = runner.run_next()
+
+    assert outcome.status == "completed"
+    assert "Codex review unavailable; Air Review failover attempted" in " ".join(outcome.evidence)
 
 
 def test_codex_review_infrastructure_failure_is_not_p40_code_failure(tmp_path):

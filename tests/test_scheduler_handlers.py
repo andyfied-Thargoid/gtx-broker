@@ -207,3 +207,26 @@ def test_review_handler_is_read_only_and_validates_findings(tmp_path):
     })
 
     assert result is HandlerResult.SUCCESS
+
+
+def test_review_handler_uses_air_only_when_codex_is_unavailable(tmp_path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    output = {"passed": True, "findings": []}
+    codex_command = [sys.executable, "-c", "import sys; sys.exit(2)"]
+    air_command = [sys.executable, "-c", f"print({json.dumps(json.dumps(output))})"]
+
+    handler = ReviewHandler()
+    result = handler.execute({
+        "kind": "review",
+        "worker_profile": "codex-review",
+        "payload": {
+            "worktree_path": str(worktree),
+            "codex_review_command": codex_command,
+            "air_review_command": air_command,
+        },
+    })
+
+    assert result is HandlerResult.SUCCESS
+    assert handler.last_result["reviewer"] == "air-review"

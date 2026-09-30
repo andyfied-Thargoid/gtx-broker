@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from enum import Enum
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -586,14 +587,52 @@ class ReviewHandler(TaskHandler):
              os.getenv("AIR_REVIEW_COMMAND")),
         ]
 
+    @staticmethod
+    def _git_snapshot(worktree_path: Path) -> Optional[tuple[str, str]]:
+        """Return HEAD and a fingerprint of all worktree content changes.
+
+        Git status alone cannot detect a reviewer that commits its changes, so
+        the snapshot includes both the current HEAD and the actual tracked
+        diff/untracked-file bytes.
+        """
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=worktree_path,
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            diff = subprocess.run(
+                ["git", "diff", "--binary", "HEAD"], cwd=worktree_path,
+                check=True, capture_output=True,
+            ).stdout
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=worktree_path, check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            digest = hashlib.sha256(head.encode() + b"\0" + diff + b"\0")
+            for relative in sorted(untracked):
+                path = worktree_path / relative
+                if path.is_file():
+                    digest.update(relative.encode() + b"\0" + path.read_bytes())
+            return head, digest.hexdigest()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
     def _execute_command(
         self, task: Dict[str, Any], worktree_path: Path, worker: str, command: Any,
     ) -> tuple[HandlerResult, Optional[Dict[str, Any]]]:
         if not command:
-            return HandlerResult.WORKER_UNAVAILABLE, None
+            return HandlerResult.WORKER_UNAVAILABLE, {
+                "reviewer": worker, "status": "unavailable",
+                "failure_kind": "review_unavailable",
+                "evidence": [f"{worker} command is not configured"],
+            }
         argv = shlex.split(command) if isinstance(command, str) else list(command)
         if not argv:
-            return HandlerResult.WORKER_UNAVAILABLE, None
+            return HandlerResult.WORKER_UNAVAILABLE, {
+                "reviewer": worker, "status": "unavailable",
+                "failure_kind": "review_unavailable",
+                "evidence": [f"{worker} command is empty"],
+            }
         schema_path: Optional[Path] = None
         command_input = json.dumps(task)
         if worker == "codex-review" and Path(argv[0]).name == "codex":
@@ -630,34 +669,84 @@ class ReviewHandler(TaskHandler):
                 ),
             })
         try:
-            before = CodingHandler._git_status(worktree_path)
+            before = self._git_snapshot(worktree_path)
+            if before is None:
+                return HandlerResult.FAILED, {
+                    "reviewer": worker, "status": "rejected",
+                    "failure_kind": "review_mutation_check_failed",
+                    "passed": False, "findings": [],
+                    "evidence": ["Unable to fingerprint the worktree before review"],
+                }
             completed = subprocess.run(
                 argv, cwd=worktree_path, input=command_input, capture_output=True,
                 text=True, timeout=self.timeout, check=False,
             )
-            after = CodingHandler._git_status(worktree_path)
-            if before != after:
-                return HandlerResult.FAILED, None
+            after = self._git_snapshot(worktree_path)
+            if after is None or before != after:
+                return HandlerResult.FAILED, {
+                    "reviewer": worker, "status": "rejected",
+                    "failure_kind": "review_mutated",
+                    "passed": False, "findings": [],
+                    "evidence": [
+                        f"{worker} review modified the worktree; reviewer execution is read-only",
+                    ],
+                }
             if completed.returncode != 0:
                 logger.warning("%s reviewer exited with status %s", worker, completed.returncode)
-                return HandlerResult.WORKER_UNAVAILABLE, None
+                return HandlerResult.WORKER_UNAVAILABLE, {
+                    "reviewer": worker, "status": "unavailable",
+                    "failure_kind": "review_unavailable",
+                    "exit_code": completed.returncode,
+                    "error": completed.stderr[-1000:],
+                    "evidence": [f"{worker} reviewer exited with status {completed.returncode}"],
+                }
             result = VisionHandler._parse_output(completed.stdout)
         except (OSError, subprocess.TimeoutExpired) as exc:
+            after = self._git_snapshot(worktree_path)
+            if before is not None and (after is None or before != after):
+                return HandlerResult.FAILED, {
+                    "reviewer": worker, "status": "rejected",
+                    "failure_kind": "review_mutated",
+                    "passed": False, "findings": [],
+                    "evidence": [
+                        f"{worker} review modified the worktree; reviewer execution is read-only",
+                    ],
+                }
             logger.warning("%s reviewer unavailable: %s", worker, exc)
-            return HandlerResult.WORKER_UNAVAILABLE, None
+            return HandlerResult.WORKER_UNAVAILABLE, {
+                "reviewer": worker, "status": "unavailable",
+                "failure_kind": "review_unavailable", "error": str(exc),
+                "timeout": isinstance(exc, subprocess.TimeoutExpired),
+                "evidence": [f"{worker} reviewer unavailable: {exc}"],
+            }
         except (ValueError, KeyError, TypeError) as exc:
             logger.error("%s review output was invalid: %s", worker, exc)
-            return HandlerResult.FAILED, None
+            return HandlerResult.FAILED, {
+                "reviewer": worker, "status": "rejected",
+                "failure_kind": "invalid_review_output", "passed": False,
+                "findings": [], "error": str(exc),
+                "evidence": [f"{worker} review output was invalid: {exc}"],
+            }
         finally:
             if schema_path is not None:
                 schema_path.unlink(missing_ok=True)
         valid, error = self.validate_output(result)
         if not valid:
             logger.error("%s review output failed validation: %s", worker, error)
-            return HandlerResult.FAILED, None
+            result = dict(result) if isinstance(result, dict) else {}
+            result.update({
+                "reviewer": worker, "status": "rejected",
+                "failure_kind": "invalid_review_output", "passed": False,
+                "error": error,
+                "evidence": [f"{worker} review output failed validation: {error}"],
+            })
+            return HandlerResult.FAILED, result
         result = dict(result)
         result["reviewer"] = worker
-        return HandlerResult.SUCCESS, result
+        result.setdefault("evidence", [])
+        result["status"] = "approved" if result["passed"] else "rejected"
+        result["failure_kind"] = "approved" if result["passed"] else "rejected_code"
+        return (HandlerResult.SUCCESS if result["passed"] else HandlerResult.FAILED), result
 
     def execute(self, task: Dict[str, Any]) -> HandlerResult:
         self.last_result = None
@@ -668,13 +757,22 @@ class ReviewHandler(TaskHandler):
         worktree_path = Path(str(worktree)).expanduser()
         if not worktree_path.is_dir():
             return HandlerResult.FAILED
+        attempts: list[Dict[str, Any]] = []
         for worker, command in self._commands(task):
             result, output = self._execute_command(task, worktree_path, worker, command)
-            if result == HandlerResult.SUCCESS:
-                self.last_result = output
+            if output is not None:
+                attempts.append(output)
+            if result in {HandlerResult.SUCCESS, HandlerResult.FAILED}:
+                self.last_result = dict(output or {})
+                self.last_result["review_attempts"] = attempts
+                self.last_result["fallback_used"] = len(attempts) > 1
                 return result
             if result != HandlerResult.WORKER_UNAVAILABLE:
                 return result
+        self.last_result = {
+            "status": "unavailable", "failure_kind": "review_unavailable",
+            "review_attempts": attempts, "fallback_used": len(attempts) > 1,
+        }
         return HandlerResult.WORKER_UNAVAILABLE
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:

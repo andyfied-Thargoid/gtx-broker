@@ -2,6 +2,7 @@
 
 import pytest
 import tempfile
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -88,6 +89,13 @@ class TestDaemonStateMachine:
             with patch('gtx_broker.daemon.get_handler_for_task') as mock_get_handler:
                 mock_handler = MagicMock()
                 mock_handler.execute.return_value = HandlerResult.FAILED
+                mock_handler.last_result = {
+                    "status": "rejected",
+                    "passed": False,
+                    "findings": [{"id": "F-1", "severity": "high"}],
+                    "reviewer": "codex-review",
+                    "review_attempts": [{"reviewer": "codex-review", "exit_code": 0}],
+                }
                 mock_get_handler.return_value = mock_handler
 
                 # Dispatch task
@@ -98,6 +106,15 @@ class TestDaemonStateMachine:
                 # Verify task failed_terminal
                 task_data = daemon.scheduler.get_task(task['id'])
                 assert task_data['state'] == 'failed_terminal'
+                assert task_data['error'] == 'Review rejected'
+                conn = daemon.scheduler._get_connection()
+                attempt = conn.execute(
+                    "SELECT result, failure_class FROM task_attempts WHERE task_id = ?",
+                    (task['id'],),
+                ).fetchone()
+                conn.close()
+                assert attempt["failure_class"] == "review_rejected"
+                assert json.loads(attempt["result"])["findings"][0]["id"] == "F-1"
 
     def test_handler_retry_requeues_to_retry_wait(self, daemon):
         """Test that RETRY result requeues task to retry_wait."""

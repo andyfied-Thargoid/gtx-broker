@@ -445,14 +445,25 @@ class SchedulerDaemon:
                 logger.info(f"Task {task_id} completed successfully")
 
             elif result == HandlerResult.FAILED:
-                # Task failed
+                # Persist structured reviewer findings and fallback evidence;
+                # a substantive rejection must not look like success.
+                handler_result = getattr(handler, "last_result", None)
+                result_payload = (
+                    dict(handler_result) if isinstance(handler_result, dict)
+                    else {"error": "handler execution failed"}
+                )
+                review_rejected = result_payload.get("status") == "rejected"
+                failure_error = "Review rejected" if review_rejected else "Handler execution failed"
                 storage_ready = not storage_claimed or self._complete_staged_input(
-                    task_id, {"error": "handler execution failed"}, "failed"
+                    task_id, result_payload, "failed"
                 )
                 if not storage_ready:
                     logger.error("Leaving failed task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.complete_task(task_id, error="Handler execution failed"):
+                if not self.scheduler.complete_task(
+                    task_id, result=result_payload, error=failure_error,
+                    failure_class="review_rejected" if review_rejected else None,
+                ):
                     logger.error("Storage completed failed task %s but scheduler update failed", task_id)
                     return False
                 logger.warning(f"Task {task_id} failed during handler execution")

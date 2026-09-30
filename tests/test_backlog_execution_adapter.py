@@ -275,10 +275,10 @@ def test_air_review_is_used_only_when_codex_review_is_unavailable(tmp_path):
         tmp_path,
         lambda request: WorkerResult(True, changed_files=("implementation.py",)),
         reviewer=lambda *args: VerificationResult(
-            False, ("Codex unavailable",), "review_unavailable"
+            False, ("Codex unavailable",), "review_unavailable", "codex"
         ),
         failover_reviewer=lambda *args: VerificationResult(
-            True, ("Air Review failover passed",), "approved"
+            True, ("Air Review failover passed",), "approved", "air-review"
         ),
     )
 
@@ -286,6 +286,8 @@ def test_air_review_is_used_only_when_codex_review_is_unavailable(tmp_path):
 
     assert outcome.status == "completed"
     assert "Codex review unavailable; Air Review failover attempted" in " ".join(outcome.evidence)
+    attempts = runner.dispatcher.get_attempt_history("TASK-001")
+    assert attempts[0]["reviewer"] == "air-review"
 
 
 def test_codex_review_infrastructure_failure_is_not_p40_code_failure(tmp_path):
@@ -403,6 +405,7 @@ def test_codex_gate_uses_exec_cd_stdin_and_output_schema(tmp_path, monkeypatch):
     completed = subprocess.CompletedProcess(
         [], 0, stdout=json.dumps({"passed": True, "findings": [], "evidence": ["clean"]}), stderr="",
     )
+    runner._git_snapshot = Mock(side_effect=[("head", "before", ()), ("head", "before", ())])
     with patch("second_shift.backlog_execution_adapter.subprocess.run", return_value=completed) as run:
         result = runner._run_codex_gate(
             "review", request, WorkerResult(True, changed_files=("x.py",)),
@@ -417,6 +420,45 @@ def test_codex_gate_uses_exec_cd_stdin_and_output_schema(tmp_path, monkeypatch):
     assert json.loads(run.call_args.kwargs["input"])["gate"] == "review"
     assert result.passed is True
     assert result.failure_kind == "approved"
+    assert result.reviewer == "codex"
+
+
+def test_codex_gate_rejects_committed_reviewer_mutation(tmp_path, monkeypatch):
+    runner = adapter(tmp_path, lambda request: WorkerResult(True, changed_files=("unused.py",)))
+    request = ExecutionRequest(
+        "TASK-001", "Review", "Review it", ("Tests pass",), str(tmp_path),
+        str(tmp_path / "worktree"), 65536, 0.8, False,
+    )
+    monkeypatch.setenv("CODEX_COMMAND", "codex")
+    runner._git_snapshot = Mock(side_effect=[("head-a", "before", ()), ("head-b", "after", ())])
+    completed = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"passed": True, "findings": []}), stderr="",
+    )
+    with patch("second_shift.backlog_execution_adapter.subprocess.run", return_value=completed):
+        result = runner._run_codex_gate("review", request, WorkerResult(True), VerificationResult(True))
+
+    assert result.passed is False
+    assert result.failure_kind == "review_mutated"
+    assert result.reviewer == "codex"
+
+
+def test_air_review_rejects_committed_reviewer_mutation(tmp_path, monkeypatch):
+    runner = adapter(tmp_path, lambda request: WorkerResult(True, changed_files=("unused.py",)))
+    request = ExecutionRequest(
+        "TASK-001", "Review", "Review it", ("Tests pass",), str(tmp_path),
+        str(tmp_path / "worktree"), 65536, 0.8, False,
+    )
+    monkeypatch.setenv("AIR_REVIEW_COMMAND", "air-review")
+    runner._git_snapshot = Mock(side_effect=[("head-a", "before", ()), ("head-b", "after", ())])
+    completed = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"passed": True, "findings": []}), stderr="",
+    )
+    with patch("second_shift.backlog_execution_adapter.subprocess.run", return_value=completed):
+        result = runner._run_air_review(request, WorkerResult(True), VerificationResult(True))
+
+    assert result.passed is False
+    assert result.failure_kind == "review_mutated"
+    assert result.reviewer == "air-review"
 
 
 def test_explicit_codex_route_uses_escalation_worker(tmp_path):
@@ -460,7 +502,7 @@ def test_unconfigured_selected_worker_fails_closed(tmp_path):
 
 
 def test_codex_gate_requires_structured_boolean_result():
-    assert BacklogExecutionAdapter._parse_codex_result('{"passed": false, "findings": ["missing test"]}', "review") == VerificationResult(False, ("missing test",))
+    assert BacklogExecutionAdapter._parse_codex_result('{"passed": false, "findings": ["missing test"]}', "review") == VerificationResult(False, ("missing test",), "rejected_code", "codex")
     assert not BacklogExecutionAdapter._parse_codex_result("approved", "review").passed
 
 

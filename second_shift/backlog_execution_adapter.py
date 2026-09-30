@@ -60,6 +60,7 @@ class VerificationResult:
     passed: bool
     evidence: tuple[str, ...] = ()
     failure_kind: str = "rejected_code"
+    reviewer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ def _verification(value: VerificationResult | Mapping[str, Any]) -> Verification
     return VerificationResult(
         bool(value.get("passed")), tuple(value.get("evidence", ())),
         str(value.get("failure_kind", "rejected_code")),
+        value.get("reviewer"),
     )
 
 
@@ -246,6 +248,23 @@ class BacklogExecutionAdapter:
             return head, digest.hexdigest(), files
         except (OSError, subprocess.CalledProcessError):
             return "", "", ()
+
+    @staticmethod
+    def _review_mutation(
+        reviewer: str, before: tuple[str, str, tuple[str, ...]],
+        after: tuple[str, str, tuple[str, ...]],
+    ) -> VerificationResult | None:
+        if not before[0] or not after[0] or before[:2] != after[:2]:
+            return VerificationResult(
+                False,
+                (
+                    f"{reviewer} review modified the worktree or its fingerprint "
+                    "could not be verified; reviewer execution is read-only",
+                ),
+                "review_mutated",
+                reviewer,
+            )
+        return None
 
     def _run_p40_worker(self, request: ExecutionRequest) -> WorkerResult:
         command = os.environ.get("P40_HERMES_COMMAND") or shutil.which("hermes-compute01")
@@ -402,9 +421,9 @@ class BacklogExecutionAdapter:
         try:
             payload = json.loads(output.strip())
         except (json.JSONDecodeError, TypeError):
-            return VerificationResult(False, (f"Codex {gate} returned non-JSON output",), "review_unavailable")
+            return VerificationResult(False, (f"Codex {gate} returned non-JSON output",), "review_unavailable", "codex")
         if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
-            return VerificationResult(False, (f"Codex {gate} JSON must contain boolean passed",), "review_unavailable")
+            return VerificationResult(False, (f"Codex {gate} JSON must contain boolean passed",), "review_unavailable", "codex")
         evidence = payload.get("evidence", [])
         findings = payload.get("findings", [])
         if isinstance(evidence, str):
@@ -414,13 +433,14 @@ class BacklogExecutionAdapter:
         return VerificationResult(
             payload["passed"], tuple(str(item) for item in [*findings, *evidence]),
             "rejected_code" if not payload["passed"] else "approved",
+            "codex",
         )
 
     def _run_codex_gate(self, gate, request, worker_result, verification):
         variable = "CODEX_REVIEW_COMMAND" if gate == "review" else "CODEX_FINAL_VERIFY_COMMAND"
         command = os.environ.get(variable) or os.environ.get("CODEX_COMMAND")
         if not command:
-            return VerificationResult(False, (f"{variable} is not configured; {gate} failed closed",), "review_unavailable")
+            return VerificationResult(False, (f"{variable} is not configured; {gate} failed closed",), "review_unavailable", "codex")
         prompt = json.dumps({
             "gate": gate, "request": asdict(request), "worker": asdict(worker_result),
             "verification": asdict(verification),
@@ -430,6 +450,7 @@ class BacklogExecutionAdapter:
             "Only inspect files under the current worktree; do not search parent directories. "
             "passed must be false when findings remain.",
         }, indent=2, sort_keys=True)
+        before = self._git_snapshot(request.worktree_path)
         try:
             completed = subprocess.run(
                 self._codex_exec_argv(
@@ -440,11 +461,20 @@ class BacklogExecutionAdapter:
                 timeout=self.codex_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
-            return VerificationResult(False, (f"Codex {gate} timed out",), "review_unavailable")
+            mutation = self._review_mutation("codex", before, self._git_snapshot(request.worktree_path))
+            if mutation:
+                return mutation
+            return VerificationResult(False, (f"Codex {gate} timed out",), "review_unavailable", "codex")
         except OSError as exc:
-            return VerificationResult(False, (f"Codex {gate} process could not be started: {exc}",), "review_unavailable")
+            mutation = self._review_mutation("codex", before, self._git_snapshot(request.worktree_path))
+            if mutation:
+                return mutation
+            return VerificationResult(False, (f"Codex {gate} process could not be started: {exc}",), "review_unavailable", "codex")
+        mutation = self._review_mutation("codex", before, self._git_snapshot(request.worktree_path))
+        if mutation:
+            return mutation
         if completed.returncode != 0:
-            return VerificationResult(False, (f"Codex {gate} process failed", completed.stderr[-1000:]), "review_unavailable")
+            return VerificationResult(False, (f"Codex {gate} process failed", completed.stderr[-1000:]), "review_unavailable", "codex")
         return self._parse_codex_result(completed.stdout, gate)
 
     def _run_codex_review(self, request, worker_result, tests):
@@ -455,9 +485,9 @@ class BacklogExecutionAdapter:
         try:
             payload = json.loads(output.strip())
         except (json.JSONDecodeError, TypeError):
-            return VerificationResult(False, ("Air Review returned non-JSON output",), "review_unavailable")
+            return VerificationResult(False, ("Air Review returned non-JSON output",), "review_unavailable", "air-review")
         if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
-            return VerificationResult(False, ("Air Review JSON must contain boolean passed",), "review_unavailable")
+            return VerificationResult(False, ("Air Review JSON must contain boolean passed",), "review_unavailable", "air-review")
         evidence = payload.get("evidence", [])
         findings = payload.get("findings", [])
         summary = payload.get("summary")
@@ -473,6 +503,7 @@ class BacklogExecutionAdapter:
         return VerificationResult(
             payload["passed"], tuple(str(item) for item in evidence),
             "rejected_code" if not payload["passed"] else "approved",
+            "air-review",
         )
 
     def _run_air_review(self, request, worker_result, tests):
@@ -492,6 +523,7 @@ class BacklogExecutionAdapter:
                 "reported_tests": asdict(tests),
             },
         }
+        before = self._git_snapshot(request.worktree_path)
         try:
             completed = subprocess.run(
                 shlex.split(command), cwd=request.worktree_path,
@@ -499,11 +531,17 @@ class BacklogExecutionAdapter:
                 timeout=self.codex_timeout_seconds, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return VerificationResult(False, (f"Air Review failover unavailable: {exc}",), "review_unavailable")
+            mutation = self._review_mutation("air-review", before, self._git_snapshot(request.worktree_path))
+            if mutation:
+                return mutation
+            return VerificationResult(False, (f"Air Review failover unavailable: {exc}",), "review_unavailable", "air-review")
+        mutation = self._review_mutation("air-review", before, self._git_snapshot(request.worktree_path))
+        if mutation:
+            return mutation
         if completed.returncode != 0:
             return VerificationResult(
                 False, ("Air Review failover process failed", completed.stderr[-1000:]),
-                "review_unavailable",
+                "review_unavailable", "air-review",
             )
         return self._parse_air_review_result(completed.stdout)
 
@@ -518,11 +556,13 @@ class BacklogExecutionAdapter:
                 False,
                 (*primary.evidence, f"Air Review failover raised {type(exc).__name__}: {exc}"),
                 "review_unavailable",
+                "air-review",
             )
         return VerificationResult(
             fallback.passed,
             (*primary.evidence, "Codex review unavailable; Air Review failover attempted", *fallback.evidence),
             fallback.failure_kind,
+            fallback.reviewer or "air-review",
         )
 
     def _run_codex_final_verification(self, request, worker_result, review):
@@ -583,7 +623,7 @@ class BacklogExecutionAdapter:
         return self.dispatcher.record_attempt_result(
             goal_id=request.issue_id, goal_class="coding", model_id=request.selected_model,
             provider=self._provider(request.selected_model), classification=classification,
-            credit_status="unknown", reviewer=None if is_codex else "codex",
+            credit_status="unknown", reviewer=review.reviewer or "codex",
             review_outcome=(
                 "approved" if review.passed
                 else "rejected" if review.failure_kind == "rejected_code"

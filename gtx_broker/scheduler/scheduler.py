@@ -244,7 +244,7 @@ class Scheduler:
         return controls
 
     def _p40_busy_cursor(self, cursor: sqlite3.Cursor) -> bool:
-        """Return whether a task is currently occupying the P40."""
+        """Return whether running or claimed work is holding the P40."""
         cursor.execute("""
             SELECT 1
             FROM tasks t
@@ -255,7 +255,15 @@ class Scheduler:
               AND w.exclusive_resource = 'p40'
             LIMIT 1
         """)
-        return cursor.fetchone() is not None
+        if cursor.fetchone() is not None:
+            return True
+
+        # A claimed task has not created an attempt yet, so its worker profile
+        # is not available in task_attempts.  Inspect the task routing before
+        # reporting the P40 ready; otherwise planning mode can announce ready
+        # in the small claim-to-start window.
+        cursor.execute("SELECT * FROM tasks WHERE state = 'claimed'")
+        return any(self._task_requires_p40(self._row_to_dict(row)) for row in cursor.fetchall())
 
     def _control_state_from_cursor(self, cursor: sqlite3.Cursor) -> Dict[str, str]:
         """Build the operator-facing control state from one DB snapshot."""
@@ -319,12 +327,20 @@ class Scheduler:
             controls = self._read_controls(cursor)
             if controls["planning"] == "on" and not self._p40_busy_cursor(cursor):
                 cursor.execute("""
-                    SELECT new_value FROM control_events
+                    SELECT id FROM control_events
+                    WHERE control = 'planning' AND new_value = 'on'
+                    ORDER BY id DESC LIMIT 1
+                """)
+                planning_session = cursor.fetchone()
+                cursor.execute("""
+                    SELECT id FROM control_events
                     WHERE control = 'p40_ready'
                     ORDER BY id DESC LIMIT 1
                 """)
-                last = cursor.fetchone()
-                if not last or last["new_value"] != "ready":
+                last_ready = cursor.fetchone()
+                if (not last_ready
+                        or not planning_session
+                        or last_ready["id"] < planning_session["id"]):
                     now = datetime.now(timezone.utc).isoformat()
                     cursor.execute("""
                         INSERT INTO control_events
@@ -689,6 +705,17 @@ class Scheduler:
                             conn.close()
                             return False
 
+                        controls = self._read_controls(cursor)
+                        if (controls["planning"] == "on"
+                                and worker.exclusive_resource == "p40"):
+                            # Recheck under the same write lock as the
+                            # claimed -> running transition.  Planning can be
+                            # enabled after claim_task() but before the
+                            # executor starts the task.
+                            conn.rollback()
+                            conn.close()
+                            return False
+
                         if worker.status != WorkerStatus.AVAILABLE:
                             self._emit_event_in_transaction(cursor, task_id, "worker_failed",
                                                            from_state=None, to_state=None,
@@ -1015,6 +1042,11 @@ class Scheduler:
                   AND (mode = 'vision' OR kind = 'vision')
             """)
             pending_vision = cursor.fetchone()[0]
+            if controls["planning"] == "on":
+                # Vision work is P40-bound and is filtered below while the
+                # operator owns the P40.  It must not keep the dispatcher in
+                # IMAGE_WINDOW and starve work that can use the slow coder.
+                pending_vision = 0
 
             # Night override is durable and intentionally independent of the
             # wall clock.  Day mode follows the Europe/London dispatch policy.

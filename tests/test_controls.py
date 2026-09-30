@@ -48,6 +48,7 @@ def test_schedule_off_blocks_claims_without_changing_planning(tmp_path):
 def test_planning_blocks_p40_but_allows_slow_coder_at_night(tmp_path):
     scheduler = make_scheduler(tmp_path)
     scheduler.add_task("p40-work", "coding", {"task": "interactive"})
+    scheduler.add_task("vision-work", "vision", {"task": "receipt"})
     scheduler.add_task(
         "night-work", "coding", {"task": "maintenance"},
         mode="batch", schedule_type="nightly",
@@ -59,6 +60,17 @@ def test_planning_blocks_p40_but_allows_slow_coder_at_night(tmp_path):
     assert [task["id"] for task in pending] == ["night-work"]
     assert scheduler.claim_task("p40-work") is None
     assert scheduler.claim_task("night-work")["id"] == "night-work"
+
+
+def test_planning_rechecked_between_claim_and_start(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler.add_task("p40-work", "coding", {"task": "interactive"})
+
+    assert scheduler.claim_task("p40-work") is not None
+    scheduler.set_control("planning", "on")
+    assert not scheduler.start_task("p40-work", "p40-coding")
+    assert scheduler.get_task("p40-work")["state"] == "claimed"
+    assert scheduler.get_control_state()["p40"] == "draining"
 
 
 def test_p40_ready_is_reported_after_active_task_finishes(tmp_path):
@@ -75,3 +87,8 @@ def test_p40_ready_is_reported_after_active_task_finishes(tmp_path):
     assert scheduler.get_control_state()["p40"] == "ready"
     ready = [event for event in scheduler.get_control_events() if event["control"] == "p40_ready"]
     assert ready
+
+    scheduler.set_control("planning", "off")
+    scheduler.set_control("planning", "on")
+    ready = [event for event in scheduler.get_control_events() if event["control"] == "p40_ready"]
+    assert len(ready) == 2

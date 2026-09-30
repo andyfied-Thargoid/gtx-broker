@@ -433,7 +433,7 @@ class CodingHandler(TaskHandler):
         if not argv:
             return HandlerResult.WORKER_UNAVAILABLE
         instruction = payload.get("instruction") or payload.get("goal") or "Implement the task."
-        payload_timeout = payload.get("timeout")
+        payload_timeout = payload.get("timeout", payload.get("timeout_seconds"))
         if payload_timeout is not None:
             timeout = float(payload_timeout)
         elif self.timeout is not None:
@@ -445,6 +445,8 @@ class CodingHandler(TaskHandler):
             ))
         try:
             before = self._git_status(worktree_path)
+            track_commits = payload.get("require_commit", True)
+            before_commit = self._git_head(worktree_path) if track_commits else ""
             completed = subprocess.run(
                 argv, cwd=worktree_path, input=str(instruction), capture_output=True,
                 text=True, timeout=timeout, check=False,
@@ -461,15 +463,25 @@ class CodingHandler(TaskHandler):
                 tests_passed = tested.returncode == 0
                 test_output = (tested.stdout + tested.stderr)[-12000:]
             after = self._git_status(worktree_path)
+            after_commit = self._git_head(worktree_path) if track_commits else ""
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.last_result = {"error": str(exc), "status": "executor_error"}
             return HandlerResult.RETRY
 
         changed = sorted(set(after) - set(before))
+        committed_files = []
+        if before_commit != after_commit:
+            committed_files = self._git_changed_files(
+                worktree_path, before_commit, after_commit
+            )
+            changed = sorted(set(changed) | set(committed_files))
         self.last_result = {
             "status": "success" if completed.returncode == 0 and tests_passed else "failed",
             "exit_code": completed.returncode,
             "changed_files": changed,
+            "committed_files": committed_files,
+            "before_commit": before_commit,
+            "after_commit": after_commit,
             "stdout": completed.stdout[-12000:],
             "stderr": completed.stderr[-12000:],
             "tests_passed": tests_passed,
@@ -492,6 +504,29 @@ class CodingHandler(TaskHandler):
             cwd=worktree, capture_output=True, text=True, check=True,
         )
         return [line for line in result.stdout.splitlines() if line.strip()]
+
+    @staticmethod
+    def _git_head(worktree: Path) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree, capture_output=True, text=True, check=True,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            return ""
+
+    @staticmethod
+    def _git_changed_files(worktree: Path, before: str, after: str) -> list[str]:
+        revision = f"{before}..{after}" if before else after
+        command = ["git", "diff", "--name-only", revision] if before else [
+            "git", "show", "--format=", "--name-only", after,
+        ]
+        result = subprocess.run(
+            command,
+            cwd=worktree, capture_output=True, text=True, check=True,
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
     def validate_output(self, output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         """Validate coding output.

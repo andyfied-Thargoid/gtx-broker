@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
 from gtx_broker.scheduler.model_profiles import ModelProfileError, P40ModelProfileController
+from gtx_broker.task_manifest import TaskManifestError
 from gtx_broker.status_api import StatusAPI
 
 logger = logging.getLogger(__name__)
@@ -312,6 +313,16 @@ class SchedulerDaemon:
             return False
 
         logger.info(f"Task {task_id} claimed")
+
+        # Manifest tasks are revalidated after queueing and before any worker
+        # or staged input is touched. Legacy tasks without a manifest retain
+        # their existing compatibility path.
+        try:
+            self.scheduler.validate_manifest_task(claimed_task)
+        except (TaskManifestError, ValueError) as exc:
+            logger.error("Manifest preflight failed for %s: %s", task_id, exc)
+            self.scheduler.fail_claimed_task(task_id, str(exc))
+            return False
 
         # Step 2: Claim durable image storage before a worker can read it.
         storage_claimed = self._claim_staged_input(task)

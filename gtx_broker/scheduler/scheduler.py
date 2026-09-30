@@ -61,7 +61,7 @@ class Scheduler:
     STATE_TRANSITIONS = {
         "accepted": ["queued", "cancelled"],
         "queued": ["claimed", "cancelled"],
-        "claimed": ["running", "retry_wait", "cancelled"],
+        "claimed": ["running", "retry_wait", "failed_terminal", "cancelled"],
         "running": ["succeeded", "failed_terminal", "retry_wait", "awaiting_review"],
         "succeeded": [],
         "failed_terminal": [],
@@ -70,7 +70,8 @@ class Scheduler:
         "cancelled": [],
     }
 
-    def __init__(self, config: Optional[SchedulerConfig] = None):
+    def __init__(self, config: Optional[SchedulerConfig] = None,
+                 repository_registry: Optional[RepositoryRegistry] = None):
         """Initialize scheduler.
 
         Args:
@@ -83,6 +84,7 @@ class Scheduler:
         self._policy = get_dispatch_policy()
         self._storage = StorageContract(Path(self.config.db_path).parent.parent)
         self._worker_registry = WorkerRegistry(self.db_path)
+        self._repository_registry = repository_registry or RepositoryRegistry.compute01_defaults()
 
         # Initialize database schema and run migrations
         self._init_db()
@@ -529,13 +531,26 @@ class Scheduler:
         priority: int = 0,
     ) -> bool:
         """Admit a coding task only after the repository boundary preflight."""
-        validated = validate_task_manifest(manifest, registry=registry, check_worktree=True)
+        repository_registry = registry or self._repository_registry
+        worker_profile = manifest.get("worker_profile")
+        worker = self._worker_registry.get_worker(worker_profile) if worker_profile else None
+        context_limit = worker.context_limit if worker else None
+        validated = validate_task_manifest(
+            manifest,
+            registry=repository_registry,
+            check_worktree=True,
+            context_limit=context_limit,
+        )
         values = validated.to_dict()
         worker_profile = values["worker_profile"]
-        payload = dict(values)
+        payload = {"manifest": dict(values)}
         payload["instruction"] = values["scope"]
         payload["worktree_path"] = str(validated.preflight.worktree_path)
         payload["repository_path"] = str(validated.preflight.worktree_path)
+        payload["worker_profile"] = worker_profile
+        payload["timeout"] = values["timeout_seconds"]
+        payload["test_command"] = values["test_command"]
+        payload["context_size"] = values["context_size"]
         mode = "batch" if worker_profile == "slow-coder" else "immediate"
         schedule_type = "nightly" if worker_profile == "slow-coder" else "immediate"
         return self.add_task(
@@ -546,6 +561,23 @@ class Scheduler:
             priority=priority,
             idempotency_key=values["task_id"],
             schedule_type=schedule_type,
+        )
+
+    def validate_manifest_task(self, task: Dict[str, Any]) -> None:
+        """Revalidate a queued manifest task immediately before execution."""
+        payload = task.get("payload") or {}
+        manifest = payload.get("manifest")
+        if manifest is None:
+            return  # Legacy queue tasks remain explicitly exempt.
+        worker_profile = manifest.get("worker_profile")
+        worker = self._worker_registry.get_worker(worker_profile) if worker_profile else None
+        if worker is None:
+            raise ValueError(f"manifest worker is unavailable: {worker_profile}")
+        validate_task_manifest(
+            manifest,
+            registry=self._repository_registry,
+            check_worktree=True,
+            context_limit=worker.context_limit,
         )
 
     def claim_task(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -719,7 +751,7 @@ class Scheduler:
 
                 try:
                     # Check task is claimed (within transaction)
-                    cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
+                    cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
                     row = cursor.fetchone()
                     if not row or row["state"] != "claimed":
                         conn.rollback()
@@ -731,6 +763,15 @@ class Scheduler:
                         task_kind = row["kind"]
                         worker = self._worker_registry.get_worker(worker_profile)
                         if not worker:
+                            conn.rollback()
+                            conn.close()
+                            return False
+
+                        task_for_validation = self._row_to_dict(row)
+                        task_for_validation["worker_profile"] = worker_profile
+                        try:
+                            self.validate_manifest_task(task_for_validation)
+                        except ValueError:
                             conn.rollback()
                             conn.close()
                             return False
@@ -1318,6 +1359,40 @@ class Scheduler:
             conn.commit()
             return True
 
+        except sqlite3.Error:
+            if conn is not None:
+                conn.rollback()
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def fail_claimed_task(self, task_id: str, error: str) -> bool:
+        """Reject a claimed task that fails its pre-execution boundary check."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row or row["state"] != "claimed":
+                conn.rollback()
+                return False
+            now = datetime.now(timezone.utc).isoformat()
+            cursor.execute("""
+                UPDATE tasks SET state = 'failed_terminal', error = ?, updated_at = ?
+                WHERE id = ? AND state = 'claimed'
+            """, (error, now, task_id))
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+            self._emit_event_in_transaction(
+                cursor, task_id, "task_rejected",
+                from_state="claimed", to_state="failed_terminal", details=error,
+            )
+            conn.commit()
+            return True
         except sqlite3.Error:
             if conn is not None:
                 conn.rollback()

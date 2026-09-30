@@ -1,6 +1,7 @@
 """Tests for repository ownership and task-manifest admission."""
 
 import subprocess
+import os
 
 import pytest
 
@@ -12,6 +13,7 @@ from gtx_broker import (
     validate_task_manifest,
 )
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
+from gtx_broker.scheduler.handlers import CodingHandler, HandlerResult
 
 
 def make_registry(tmp_path):
@@ -91,8 +93,19 @@ def test_manifest_rejects_unsafe_review_or_worker_policy(tmp_path):
     with pytest.raises(TaskManifestError, match="merge_policy"):
         validate_task_manifest(manifest, registry=make_registry(tmp_path), check_worktree=False)
 
+    manifest = make_manifest(tmp_path)
+    manifest["worker_profile"] = "slow-coder"
+    manifest["context_size"] = 65537
+    with pytest.raises(TaskManifestError, match="worker limit 65536"):
+        validate_task_manifest(
+            manifest,
+            registry=make_registry(tmp_path),
+            check_worktree=False,
+            context_limit=65536,
+        )
 
-def test_checkout_preflight_requires_clean_owned_branch(tmp_path):
+
+def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch):
     path = tmp_path / "worktrees" / "task-001"
     path.mkdir(parents=True)
     def git(*args):
@@ -110,14 +123,40 @@ def test_checkout_preflight_requires_clean_owned_branch(tmp_path):
 
     manifest = make_manifest(tmp_path)
     manifest["worktree_path"] = str(path)
+    manifest["test_command"] = "true"
     result = validate_task_manifest(manifest, registry=make_registry(tmp_path))
     assert result.preflight.branch == "automation/task-001"
 
-    scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "tasks.db")))
-    assert scheduler.add_manifest_task(manifest, registry=make_registry(tmp_path))
+    registry = make_registry(tmp_path)
+    scheduler = Scheduler(
+        SchedulerConfig(db_path=str(tmp_path / "tasks.db")),
+        repository_registry=registry,
+    )
+    assert scheduler.add_manifest_task(manifest, registry=registry)
     queued = scheduler.get_task("TASK-001")
     assert queued["state"] == "queued"
     assert queued["payload"]["worker_profile"] == "p40-coding"
+
+    executor = tmp_path / "executor.sh"
+    executor.write_text(
+        "#!/bin/sh\n"
+        "printf 'implemented\\n' > committed.txt\n"
+        "git config user.email tests@example.invalid\n"
+        "git config user.name 'Boundary Tests'\n"
+        "git add committed.txt\n"
+        "git commit -m 'implement manifest task'\n"
+    )
+    executor.chmod(executor.stat().st_mode | 0o111)
+    monkeypatch.setenv("P40_CODING_COMMAND", str(executor))
+    assert scheduler.claim_task("TASK-001") is not None
+    assert scheduler.start_task("TASK-001", "p40-coding")
+    task = scheduler.get_task("TASK-001")
+    task["worker_profile"] = "p40-coding"
+    handler = CodingHandler()
+    result = handler.execute(task)
+    assert result == HandlerResult.SUCCESS, handler.last_result
+    assert scheduler.complete_task("TASK-001", result={"status": "success"})
+    assert scheduler.get_task("TASK-001")["state"] == "succeeded"
 
     (path / "dirty.txt").write_text("must fail\n")
     with pytest.raises(TaskManifestError, match="clean"):

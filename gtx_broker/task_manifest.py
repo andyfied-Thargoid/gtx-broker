@@ -99,6 +99,7 @@ def validate_task_manifest(
     *,
     registry: Optional[RepositoryRegistry] = None,
     check_worktree: bool = True,
+    context_limit: Optional[int] = None,
 ) -> TaskManifest:
     """Validate a coding manifest and its repository boundary.
 
@@ -142,6 +143,10 @@ def validate_task_manifest(
         raise TaskManifestError("context_size must be an integer")
     if not 1 <= values["context_size"] <= MAX_CONTEXT_SIZE:
         raise TaskManifestError(f"context_size must be between 1 and {MAX_CONTEXT_SIZE}")
+    if context_limit is not None and values["context_size"] > context_limit:
+        raise TaskManifestError(
+            f"context_size {values['context_size']} exceeds worker limit {context_limit}"
+        )
     if values["worker_profile"] not in ALLOWED_WORKERS:
         raise TaskManifestError(f"worker_profile must be one of {sorted(ALLOWED_WORKERS)}")
     for name in ("commit_required", "pull_request_required"):

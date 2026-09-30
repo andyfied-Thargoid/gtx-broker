@@ -604,7 +604,7 @@ class ReviewHandler(TaskHandler):
                 "type": "object",
                 "properties": {
                     "passed": {"type": "boolean"},
-                    "findings": {"type": "array", "items": {"type": "object"}},
+                    "findings": {"type": "array", "items": {"type": "string"}},
                     "evidence": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["passed", "findings"],
@@ -682,6 +682,8 @@ class ReviewHandler(TaskHandler):
         if not isinstance(output.get("findings"), list):
             return False, "review output findings must be an array"
         for finding in output["findings"]:
+            if isinstance(finding, str):
+                continue
             if not isinstance(finding, dict) or not finding.get("id") or not finding.get("severity"):
                 return False, "each finding needs id and severity"
         return True, None

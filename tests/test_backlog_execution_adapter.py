@@ -411,6 +411,7 @@ def test_codex_gate_uses_exec_cd_stdin_and_output_schema(tmp_path, monkeypatch):
 
     argv = run.call_args.args[0]
     assert argv[:4] == ["codex", "exec", "--cd", str(tmp_path / "worktree")]
+    assert "--ephemeral" in argv
     assert "--output-schema" in argv
     assert "--in" not in argv and "-z" not in argv
     assert json.loads(run.call_args.kwargs["input"])["gate"] == "review"

@@ -230,3 +230,36 @@ def test_review_handler_uses_air_only_when_codex_is_unavailable(tmp_path):
 
     assert result is HandlerResult.SUCCESS
     assert handler.last_result["reviewer"] == "air-review"
+
+
+def test_review_handler_expands_bare_codex_command(tmp_path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    completed = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"passed": True, "findings": []}), stderr="",
+    )
+
+    with patch("gtx_broker.scheduler.handlers.subprocess.run", return_value=completed) as run:
+        result = ReviewHandler().execute({
+            "kind": "review",
+            "worker_profile": "codex-review",
+            "payload": {
+                "worktree_path": str(worktree),
+                "codex_review_command": "/home/andyfied/.local/bin/codex",
+            },
+    })
+
+    assert result is HandlerResult.SUCCESS
+    codex_call = next(
+        call for call in run.call_args_list
+        if call.args and call.args[0][0] == "/home/andyfied/.local/bin/codex"
+    )
+    argv = codex_call.args[0]
+    assert argv[:2] == ["/home/andyfied/.local/bin/codex", "exec"]
+    assert ["--cd", str(worktree)] == argv[argv.index("--cd"):argv.index("--cd") + 2]
+    assert "--ephemeral" in argv
+    assert "--output-schema" in argv
+    assert json.loads(codex_call.kwargs["input"])["instruction"].startswith(
+        "Inspect the current worktree"
+    )

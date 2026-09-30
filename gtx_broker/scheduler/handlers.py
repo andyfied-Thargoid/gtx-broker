@@ -607,8 +607,8 @@ class ReviewHandler(TaskHandler):
                     "findings": {"type": "array", "items": {"type": "string"}},
                     "evidence": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["passed", "findings"],
-                "additionalProperties": True,
+                "required": ["passed", "findings", "evidence"],
+                "additionalProperties": False,
             }, schema_file)
             schema_file.close()
             schema_path = Path(schema_file.name)

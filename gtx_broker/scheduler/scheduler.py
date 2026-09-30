@@ -23,6 +23,18 @@ from gtx_broker.scheduler.migrations import MigrationRunner
 logger = logging.getLogger(__name__)
 
 
+CONTROL_DEFAULTS = {
+    "schedule": "on",
+    "planning": "off",
+    "mode": "day",
+}
+CONTROL_VALUES = {
+    "schedule": {"on", "off"},
+    "planning": {"on", "off"},
+    "mode": {"day", "night"},
+}
+
+
 @dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
@@ -188,8 +200,195 @@ class Scheduler:
         )
         """)
 
+        # Durable operator controls are deliberately kept in the broker DB so
+        # a daemon restart cannot silently resume a mode the operator turned
+        # off.  control_events provides a small audit trail for automation and
+        # for the operator-facing status API.
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scheduler_controls (
+            name TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT 'system'
+        )
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS control_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            control TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP NOT NULL
+        )
+        """)
+        now = datetime.now(timezone.utc).isoformat()
+        for name, value in CONTROL_DEFAULTS.items():
+            cursor.execute("""
+                INSERT OR IGNORE INTO scheduler_controls
+                    (name, value, updated_at, updated_by)
+                VALUES (?, ?, ?, 'system')
+            """, (name, value, now))
+
         conn.commit()
         conn.close()
+
+    def _read_controls(self, cursor: sqlite3.Cursor) -> Dict[str, str]:
+        """Read durable controls using an existing database cursor."""
+        controls = dict(CONTROL_DEFAULTS)
+        cursor.execute("SELECT name, value FROM scheduler_controls")
+        for row in cursor.fetchall():
+            if row["name"] in CONTROL_DEFAULTS:
+                controls[row["name"]] = row["value"]
+        return controls
+
+    def _p40_busy_cursor(self, cursor: sqlite3.Cursor) -> bool:
+        """Return whether a task is currently occupying the P40."""
+        cursor.execute("""
+            SELECT 1
+            FROM tasks t
+            INNER JOIN task_attempts a ON t.id = a.task_id
+            INNER JOIN workers w ON a.worker_profile = w.profile
+            WHERE t.state = 'running'
+              AND a.end_at IS NULL
+              AND w.exclusive_resource = 'p40'
+            LIMIT 1
+        """)
+        return cursor.fetchone() is not None
+
+    def _control_state_from_cursor(self, cursor: sqlite3.Cursor) -> Dict[str, str]:
+        """Build the operator-facing control state from one DB snapshot."""
+        controls = self._read_controls(cursor)
+        if controls["planning"] == "on":
+            controls["p40"] = "draining" if self._p40_busy_cursor(cursor) else "ready"
+        else:
+            controls["p40"] = "busy" if self._p40_busy_cursor(cursor) else "available"
+        return controls
+
+    def get_control_state(self) -> Dict[str, str]:
+        """Return durable schedule/planning controls and P40 readiness."""
+        try:
+            conn = self._get_connection()
+            state = self._control_state_from_cursor(conn.cursor())
+            conn.close()
+            return state
+        except sqlite3.Error:
+            return {**CONTROL_DEFAULTS, "p40": "available"}
+
+    def get_control_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent operator-control audit events."""
+        if limit < 1:
+            return []
+        try:
+            conn = self._get_connection()
+            rows = conn.execute("""
+                SELECT id, control, old_value, new_value, actor, reason, created_at
+                FROM control_events
+                ORDER BY id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
+    def _task_requires_p40(self, task: Dict[str, Any]) -> bool:
+        """Identify work that must wait while planning mode owns the P40."""
+        if task.get("review_tag") or task.get("review_worker"):
+            return False
+        payload = task.get("payload") or {}
+        requested_profile = task.get("worker_profile") or payload.get("worker_profile")
+        if requested_profile:
+            return str(requested_profile).startswith("p40")
+        if task.get("kind") == "vision" or task.get("mode") == "vision":
+            return True
+        if task.get("kind") == "coding":
+            return not (
+                task.get("schedule_type") == "nightly"
+                or task.get("mode") in {"batch", "maintenance"}
+            )
+        return False
+
+    def _record_p40_ready_if_needed(self) -> None:
+        """Record readiness once planning mode has drained the P40."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            controls = self._read_controls(cursor)
+            if controls["planning"] == "on" and not self._p40_busy_cursor(cursor):
+                cursor.execute("""
+                    SELECT new_value FROM control_events
+                    WHERE control = 'p40_ready'
+                    ORDER BY id DESC LIMIT 1
+                """)
+                last = cursor.fetchone()
+                if not last or last["new_value"] != "ready":
+                    now = datetime.now(timezone.utc).isoformat()
+                    cursor.execute("""
+                        INSERT INTO control_events
+                            (control, old_value, new_value, actor, reason, created_at)
+                        VALUES ('p40_ready', 'draining', 'ready', 'scheduler',
+                                'P40 is free while planning mode is enabled', ?)
+                    """, (now,))
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            if 'conn' in locals():
+                conn.rollback()
+                conn.close()
+
+    def set_control(self, name: str, value: Any, *, actor: str = "operator",
+                    reason: Optional[str] = None) -> Dict[str, str]:
+        """Persist one operator control and return the resulting state."""
+        if name not in CONTROL_VALUES:
+            raise ValueError(f"unsupported control: {name}")
+        if name in {"schedule", "planning"} and isinstance(value, bool):
+            value = "on" if value else "off"
+        value = str(value).lower()
+        if value not in CONTROL_VALUES[name]:
+            raise ValueError(f"unsupported value for {name}: {value}")
+        actor = str(actor or "operator")[:128]
+        reason = None if reason is None else str(reason)[:512]
+
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT value FROM scheduler_controls WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            old_value = row["value"] if row else CONTROL_DEFAULTS[name]
+            now = datetime.now(timezone.utc).isoformat()
+            cursor.execute("""
+                INSERT INTO scheduler_controls (name, value, updated_at, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+            """, (name, value, now, actor))
+            if old_value != value:
+                cursor.execute("""
+                    INSERT INTO control_events
+                        (control, old_value, new_value, actor, reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (name, old_value, value, actor, reason, now))
+            state = self._control_state_from_cursor(cursor)
+            if name == "planning" and value == "on" and state["p40"] == "ready":
+                cursor.execute("""
+                    INSERT INTO control_events
+                        (control, old_value, new_value, actor, reason, created_at)
+                    VALUES ('p40_ready', 'draining', 'ready', 'scheduler',
+                            'P40 is free when planning mode was enabled', ?)
+                """, (now,))
+            conn.commit()
+            return state
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _emit_event(self, task_id: str, event_type: str, from_state: Optional[str] = None,
                     to_state: Optional[str] = None, details: Optional[str] = None):
@@ -316,10 +515,13 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
 
+            cursor.execute("BEGIN IMMEDIATE")
+
             # Get current state before update
-            cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
+                conn.rollback()
                 conn.close()
                 return None
 
@@ -327,10 +529,23 @@ class Scheduler:
 
             # Validate transition is legal per STATE_TRANSITIONS
             if from_state != "queued":
+                conn.rollback()
+                conn.close()
+                return None
+
+            controls = self._read_controls(cursor)
+            if controls["schedule"] != "on":
+                conn.rollback()
+                conn.close()
+                return None
+            task = self._row_to_dict(row)
+            if controls["planning"] == "on" and self._task_requires_p40(task):
+                conn.rollback()
                 conn.close()
                 return None
 
             if not self._validate_transition(task_id, from_state, "claimed"):
+                conn.rollback()
                 conn.close()
                 return None
 
@@ -341,6 +556,7 @@ class Scheduler:
             """, (datetime.now(timezone.utc).isoformat(), task_id))
 
             if cursor.rowcount == 0:
+                conn.rollback()
                 conn.close()
                 return None
 
@@ -609,6 +825,7 @@ class Scheduler:
 
                 conn.commit()
                 conn.close()
+                self._record_p40_ready_if_needed()
                 return True
 
             except sqlite3.Error:
@@ -779,9 +996,16 @@ class Scheduler:
         - Vision tasks: IMAGE_WINDOW only (00:00-06:00)
         - Batch tasks: BATCH_WINDOW or IMAGE_WINDOW (after images empty)
         """
+        if limit is not None and limit < 1:
+            return []
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+
+            controls = self._control_state_from_cursor(cursor)
+            if controls["schedule"] != "on":
+                conn.close()
+                return []
 
             # Get pending vision task count for policy decision
             # Count queued, claimed, and running vision tasks to determine if image queue is drained
@@ -792,8 +1016,15 @@ class Scheduler:
             """)
             pending_vision = cursor.fetchone()[0]
 
-            # Get current schedule window
-            current_window = self._policy.get_current_window(pending_vision=pending_vision)
+            # Night override is durable and intentionally independent of the
+            # wall clock.  Day mode follows the Europe/London dispatch policy.
+            if controls["mode"] == "night":
+                current_window = (
+                    ScheduleWindow.IMAGE_WINDOW
+                    if pending_vision > 0 else ScheduleWindow.BATCH_WINDOW
+                )
+            else:
+                current_window = self._policy.get_current_window(pending_vision=pending_vision)
 
             # Build query based on window
             # IMMEDIATE tasks always allowed
@@ -812,8 +1043,7 @@ class Scheduler:
                     CASE WHEN kind IN ('coding', 'vision')
                               AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
                     priority DESC, created_at ASC
-                LIMIT ?
-                """, (limit,))
+                """)
             elif current_window == ScheduleWindow.BATCH_WINDOW:
                 # Batch window: batch + immediate
                 cursor.execute("""
@@ -826,8 +1056,7 @@ class Scheduler:
                               AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
                     CASE WHEN mode = 'immediate' THEN 0 ELSE 1 END,
                     priority DESC, created_at ASC
-                LIMIT ?
-                """, (limit,))
+                """)
             else:
                 # RESTRICTED: only immediate tasks
                 cursor.execute("""
@@ -838,13 +1067,15 @@ class Scheduler:
                     CASE WHEN kind IN ('coding', 'vision')
                               AND COALESCE(CAST(review_tag AS INTEGER), 0) = 0 THEN 0 ELSE 1 END,
                     priority DESC, created_at ASC
-                LIMIT ?
-                """, (limit,))
+                """)
 
             rows = cursor.fetchall()
             conn.close()
 
-            return [self._row_to_dict(row) for row in rows]
+            tasks = [self._row_to_dict(row) for row in rows]
+            if controls["planning"] == "on":
+                tasks = [task for task in tasks if not self._task_requires_p40(task)]
+            return tasks[:limit] if limit is not None else tasks
         except (sqlite3.OperationalError, sqlite3.ProgrammingError):
             return []
 
@@ -973,6 +1204,7 @@ class Scheduler:
                 conn.commit()
 
             conn.close()
+            self._record_p40_ready_if_needed()
             return True
 
         except sqlite3.OperationalError:
@@ -1068,6 +1300,7 @@ class Scheduler:
                 conn.commit()
 
             conn.close()
+            self._record_p40_ready_if_needed()
             return True
 
         except sqlite3.OperationalError:

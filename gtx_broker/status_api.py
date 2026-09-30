@@ -58,6 +58,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
                 self._handle_queue_position(task_id)
             else:
                 self._handle_queue_stats()
+        elif parsed.path == "/controls":
+            self._handle_controls_get()
         else:
             self._send_error_response("Not found", 404)
 
@@ -65,6 +67,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         """Handle POST requests."""
         if self.path == "/cancel":
             self._handle_cancel()
+        elif self.path == "/controls":
+            self._handle_controls_post()
         else:
             self._send_error_response("Not found", 404)
 
@@ -88,6 +92,7 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             "worker_profile": task.get("worker_profile"),
             "created_at": task.get("created_at"),
             "updated_at": task.get("updated_at"),
+            "controls": self.scheduler.get_control_state(),
             "events": events,
         }
         self._send_json_response(response)
@@ -103,8 +108,64 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             "succeeded": depths.get("succeeded", 0),
             "failed": depths.get("failed_terminal", 0),
             "total": sum(depths.values()),
+            "controls": self.scheduler.get_control_state(),
         }
         self._send_json_response(response)
+
+    def _handle_controls_get(self):
+        """Return durable schedule/planning controls and their audit trail."""
+        self._send_json_response({
+            "controls": self.scheduler.get_control_state(),
+            "events": self.scheduler.get_control_events(limit=20),
+        })
+
+    def _read_json_body(self) -> Optional[Dict[str, Any]]:
+        """Read a JSON object request body, reporting protocol errors."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_error_response("Invalid Content-Length", 400)
+            return None
+        if content_length == 0:
+            self._send_error_response("Request body required", 400)
+            return None
+        try:
+            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_error_response("Invalid JSON", 400)
+            return None
+        if not isinstance(data, dict):
+            self._send_error_response("JSON object required", 400)
+            return None
+        return data
+
+    def _handle_controls_post(self):
+        """Set one durable control without changing the other controls."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        names = [name for name in ("schedule", "planning", "mode") if name in data]
+        if len(names) != 1:
+            self._send_error_response(
+                "Provide exactly one of schedule, planning, or mode", 400
+            )
+            return
+        name = names[0]
+        try:
+            controls = self.scheduler.set_control(
+                name,
+                data[name],
+                actor=data.get("actor", "operator"),
+                reason=data.get("reason"),
+            )
+        except ValueError as exc:
+            self._send_error_response(str(exc), 400)
+            return
+        self._send_json_response({
+            "success": True,
+            "controls": controls,
+            "events": self.scheduler.get_control_events(limit=20),
+        })
 
     def _handle_queue_position(self, task_id: str):
         """Get queue position for a specific task.

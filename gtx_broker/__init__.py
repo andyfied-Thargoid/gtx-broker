@@ -43,6 +43,14 @@ from .api import (
     ItemLifecycle,
     RunnerConfig,
 )
+from .repository_boundary import (
+    OwnedRepository,
+    RepositoryBoundaryError,
+    RepositoryPreflight,
+    RepositoryRegistry,
+    normalize_remote,
+)
+from .task_manifest import TaskManifest, TaskManifestError, validate_task_manifest
 
 __all__ = [
     "__version__",
@@ -74,4 +82,12 @@ __all__ = [
     "DispatchOutcome",
     "ItemLifecycle",
     "RunnerConfig",
+    "OwnedRepository",
+    "RepositoryBoundaryError",
+    "RepositoryPreflight",
+    "RepositoryRegistry",
+    "normalize_remote",
+    "TaskManifest",
+    "TaskManifestError",
+    "validate_task_manifest",
 ]

@@ -6,11 +6,14 @@ import os
 import signal
 import time
 from pathlib import Path
+from threading import Thread
 from typing import Any, Dict, Optional
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
 from gtx_broker.scheduler.model_profiles import ModelProfileError, P40ModelProfileController
+from gtx_broker.task_manifest import TaskManifestError
+from gtx_broker.status_api import StatusAPI
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +34,45 @@ class SchedulerDaemon:
         Args:
             config: Scheduler config
         """
+        self.config = config
         self.scheduler = Scheduler(config)
         self.storage = self.scheduler._storage
         self.model_profiles = P40ModelProfileController()
         self.retention_days = self._configured_retention_days()
         self._active_tasks: Dict[str, bool] = {}
         self._running = False
+        self._api: Optional[StatusAPI] = None
+        self._api_thread: Optional[Thread] = None
         self._setup_signals()
         self._recover_interrupted_tasks()
         self._run_retention_cleanup()
         self._last_retention_cleanup = time.monotonic()
 
         logger.info("Scheduler daemon initialized")
+
+    def _start_status_api(self, port: int = 11439) -> bool:
+        """Start status API server.
+
+        Args:
+            port: Port to listen on (default 11439)
+
+        Returns:
+            True if server started successfully
+        """
+        self._api = StatusAPI(self.scheduler, port)
+        if not self._api.start():
+            logger.warning("Failed to start status API on port %d", port)
+            return False
+
+        # Start background thread to run server
+        self._api_thread = Thread(
+            target=self._api.run_forever,
+            daemon=True,
+            name="gtx-status-api",
+        )
+        self._api_thread.start()
+        logger.info("Status API server started on port %d", port)
+        return True
 
     @staticmethod
     def _configured_retention_days() -> int:
@@ -56,6 +86,19 @@ class SchedulerDaemon:
             logger.warning("Negative GTX_IMAGE_RETENTION_DAYS=%r; using 30", raw)
             return 30
         return days
+
+    @staticmethod
+    def _configured_status_api_port() -> int:
+        raw = os.getenv("GTX_STATUS_API_PORT", "11439")
+        try:
+            port = int(raw)
+        except ValueError:
+            logger.warning("Invalid GTX_STATUS_API_PORT=%r; using 11439", raw)
+            return 11439
+        if not 1 <= port <= 65535:
+            logger.warning("GTX_STATUS_API_PORT=%r is outside 1-65535; using 11439", raw)
+            return 11439
+        return port
 
     def _run_retention_cleanup(self) -> None:
         try:
@@ -143,48 +186,58 @@ class SchedulerDaemon:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-    def run(self, poll_interval: int = 5):
+    def run(self, poll_interval: int = 5, api_port: int = 11439):
         """Run the daemon loop.
 
         Args:
             poll_interval: Seconds between polls (default 5)
+            api_port: Port for status API (default 11439)
         """
+        # Start status API server
+        self._start_status_api(api_port)
+
         logger.info(f"Starting daemon with poll interval {poll_interval}s")
         self._running = True
 
-        while self._running:
-            try:
-                if time.monotonic() - self._last_retention_cleanup >= 86400:
-                    self._run_retention_cleanup()
-                    self._last_retention_cleanup = time.monotonic()
-                # Try to get a queued task first
-                task = self.scheduler.get_next_task()
-                
-                # If no queued task, check for retry_wait tasks and promote them
-                if not task:
-                    retry_task = self.scheduler.get_retry_wait_task()
-                    if retry_task:
-                        # Promote retry_wait → queued using existing requeue_retry_wait()
-                        promoted = self.scheduler.requeue_retry_wait(retry_task['id'])
-                        if promoted:
-                            logger.debug(f"Promoted task {retry_task['id']} from retry_wait to queued")
-                            # Now get the promoted task
-                            task = self.scheduler.get_next_task()
+        try:
+            while self._running:
+                try:
+                    if time.monotonic() - self._last_retention_cleanup >= 86400:
+                        self._run_retention_cleanup()
+                        self._last_retention_cleanup = time.monotonic()
+                    # Try to get a queued task first
+                    task = self.scheduler.get_next_task()
+
+                    # If no queued task, check for retry_wait tasks and promote them
+                    if not task:
+                        retry_task = self.scheduler.get_retry_wait_task()
+                        if retry_task:
+                            # Promote retry_wait → queued using existing requeue_retry_wait()
+                            promoted = self.scheduler.requeue_retry_wait(retry_task['id'])
+                            if promoted:
+                                logger.debug(f"Promoted task {retry_task['id']} from retry_wait to queued")
+                                # Now get the promoted task
+                                task = self.scheduler.get_next_task()
+                            else:
+                                logger.debug(f"Failed to promote task {retry_task['id']}, skipping")
                         else:
-                            logger.debug(f"Failed to promote task {retry_task['id']}, skipping")
+                            logger.debug("No tasks available (queued or retry_wait), waiting...")
                     else:
-                        logger.debug("No tasks available (queued or retry_wait), waiting...")
-                else:
-                    logger.info(f"Processing task {task['id']} (kind={task['kind']})")
-                    self._dispatch_task(task)
-                    continue  # Skip the no-task check below
-                
-            except Exception as e:
-                logger.exception(f"Error in daemon loop: {e}")
+                        logger.info(f"Processing task {task['id']} (kind={task['kind']})")
+                        self._dispatch_task(task)
+                        continue  # Skip the no-task check below
 
-            time.sleep(poll_interval)
+                except Exception as e:
+                    logger.exception(f"Error in daemon loop: {e}")
 
-        logger.info("Daemon stopped")
+                time.sleep(poll_interval)
+        finally:
+            if self._api:
+                self._api.shutdown()
+            if self._api_thread and self._api_thread.is_alive():
+                self._api_thread.join(timeout=5)
+            self._api_thread = None
+            logger.info("Daemon stopped")
 
     def _get_worker_for_task(self, task_or_kind: Any) -> Optional[str]:
         """Get an available worker for a task, including review routing.
@@ -260,6 +313,16 @@ class SchedulerDaemon:
             return False
 
         logger.info(f"Task {task_id} claimed")
+
+        # Manifest tasks are revalidated after queueing and before any worker
+        # or staged input is touched. Legacy tasks without a manifest retain
+        # their existing compatibility path.
+        try:
+            self.scheduler.validate_manifest_task(claimed_task)
+        except (TaskManifestError, ValueError) as exc:
+            logger.error("Manifest preflight failed for %s: %s", task_id, exc)
+            self.scheduler.fail_claimed_task(task_id, str(exc))
+            return False
 
         # Step 2: Claim durable image storage before a worker can read it.
         storage_claimed = self._claim_staged_input(task)
@@ -382,25 +445,45 @@ class SchedulerDaemon:
                 logger.info(f"Task {task_id} completed successfully")
 
             elif result == HandlerResult.FAILED:
-                # Task failed
+                # Persist structured reviewer findings and fallback evidence;
+                # a substantive rejection must not look like success.
+                handler_result = getattr(handler, "last_result", None)
+                result_payload = (
+                    dict(handler_result) if isinstance(handler_result, dict)
+                    else {"error": "handler execution failed"}
+                )
+                review_rejected = result_payload.get("status") == "rejected"
+                failure_error = "Review rejected" if review_rejected else "Handler execution failed"
                 storage_ready = not storage_claimed or self._complete_staged_input(
-                    task_id, {"error": "handler execution failed"}, "failed"
+                    task_id, result_payload, "failed"
                 )
                 if not storage_ready:
                     logger.error("Leaving failed task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.complete_task(task_id, error="Handler execution failed"):
+                if not self.scheduler.complete_task(
+                    task_id, result=result_payload, error=failure_error,
+                    failure_class="review_rejected" if review_rejected else None,
+                ):
                     logger.error("Storage completed failed task %s but scheduler update failed", task_id)
                     return False
                 logger.warning(f"Task {task_id} failed during handler execution")
 
             elif result == HandlerResult.RETRY:
                 # Task should retry later
+                handler_result = getattr(handler, "last_result", None)
+                retry_result = dict(handler_result) if isinstance(handler_result, dict) else None
+                retry_failure_class = (
+                    retry_result.get("failure_kind")
+                    if retry_result and isinstance(retry_result.get("failure_kind"), str)
+                    else None
+                )
                 storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
                 if not storage_ready:
                     logger.error("Leaving retrying task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                if not self.scheduler.transition_running_to_retry_wait(
+                    task_id, result=retry_result, failure_class=retry_failure_class,
+                ):
                     logger.error("Storage requeued task %s but scheduler update failed", task_id)
                     return False
                 logger.info(f"Task {task_id} transitioned to retry_wait")
@@ -408,11 +491,20 @@ class SchedulerDaemon:
             elif result == HandlerResult.WORKER_UNAVAILABLE:
                 # Worker not available (e.g., model not loaded)
                 # Mark as retry_wait to retry later
+                handler_result = getattr(handler, "last_result", None)
+                retry_result = dict(handler_result) if isinstance(handler_result, dict) else None
+                retry_failure_class = (
+                    retry_result.get("failure_kind")
+                    if retry_result and isinstance(retry_result.get("failure_kind"), str)
+                    else None
+                )
                 storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
                 if not storage_ready:
                     logger.error("Leaving unavailable task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                if not self.scheduler.transition_running_to_retry_wait(
+                    task_id, result=retry_result, failure_class=retry_failure_class,
+                ):
                     logger.error("Storage requeued task %s but scheduler update failed", task_id)
                     return False
                 logger.info(f"Task {task_id} transitioned to retry_wait - worker unavailable")
@@ -422,8 +514,12 @@ class SchedulerDaemon:
                 handler_result = getattr(handler, "last_result", None)
                 review_result = {
                     "status": "awaiting_review",
+                    "handler_result": handler_result if isinstance(handler_result, dict) else None,
                     "vision_result": handler_result if isinstance(handler_result, dict) else None,
                 }
+                manifest = (task.get("payload") or {}).get("manifest")
+                if isinstance(manifest, dict):
+                    review_result["review_policy"] = manifest.get("review_policy")
                 storage_ready = not storage_claimed or self._complete_staged_input(
                     task_id, review_result, "awaiting_review"
                 )
@@ -468,10 +564,12 @@ class SchedulerDaemon:
 
 
 if __name__ == "__main__":
+    import logging
     logging.basicConfig(
         level=os.getenv("GTX_BROKER_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     SchedulerDaemon(SchedulerConfig()).run(
-        poll_interval=float(os.getenv("GTX_BROKER_POLL_INTERVAL", "5"))
+        poll_interval=float(os.getenv("GTX_BROKER_POLL_INTERVAL", "5")),
+        api_port=SchedulerDaemon._configured_status_api_port(),
     )

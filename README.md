@@ -43,3 +43,11 @@ The package uses Pillow and python-magic for validated image ingress in
 addition to the Python standard library.
 Workstation and Telegram integration remain separate deployment concerns and
 are verified on compute01 before their local compatibility imports are removed.
+
+The scheduler daemon also exposes a localhost-only operator API for task status,
+queue information, and cancellation. See docs/status-api.md for the endpoints
+and deployment configuration.
+
+Automated coding admission is governed by the owned-repository and task
+manifest boundary in `docs/task-manifest.md`. New coding work must pass that
+preflight before it can be dispatched.

@@ -115,6 +115,40 @@ class TestStatusAPIIntegration(unittest.TestCase):
             self.assertIn("queued", data)
             self.assertEqual(data["queued"], 1)
 
+    def test_controls_endpoint_persists_planning_state(self):
+        """Operator controls are exposed and do not overwrite other controls."""
+        with urllib.request.urlopen(f"{self.base_url}/controls", timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(data["controls"]["schedule"], "on")
+        self.assertEqual(data["controls"]["planning"], "off")
+
+        payload = json.dumps({
+            "planning": "on",
+            "actor": "test",
+            "reason": "operator planning",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/controls",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        self.assertTrue(data["success"])
+        self.assertEqual(data["controls"]["planning"], "on")
+        self.assertEqual(data["controls"]["schedule"], "on")
+
+    def test_controls_endpoint_requires_one_control(self):
+        payload = json.dumps({"schedule": "off", "planning": "on"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/controls",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(context.exception.code, 400)
+
     def test_queue_position_missing_task(self):
         """Test GET /queue?task_id=nonexistent returns 404."""
         req = urllib.request.Request(f"{self.base_url}/queue?task_id=nonexistent")

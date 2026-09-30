@@ -18,6 +18,8 @@ from gtx_broker.scheduler.storage import StorageContract
 from gtx_broker.scheduler.workers import WorkerRegistry, WorkerStatus, initialize_workers
 from gtx_broker.scheduler.policies import get_dispatch_policy, ScheduleWindow
 from gtx_broker.scheduler.migrations import MigrationRunner
+from gtx_broker.repository_boundary import RepositoryRegistry
+from gtx_broker.task_manifest import validate_task_manifest
 
 
 logger = logging.getLogger(__name__)
@@ -518,6 +520,33 @@ class Scheduler:
 
         except sqlite3.OperationalError:
             return False
+
+    def add_manifest_task(
+        self,
+        manifest: Dict[str, Any],
+        *,
+        registry: Optional[RepositoryRegistry] = None,
+        priority: int = 0,
+    ) -> bool:
+        """Admit a coding task only after the repository boundary preflight."""
+        validated = validate_task_manifest(manifest, registry=registry, check_worktree=True)
+        values = validated.to_dict()
+        worker_profile = values["worker_profile"]
+        payload = dict(values)
+        payload["instruction"] = values["scope"]
+        payload["worktree_path"] = str(validated.preflight.worktree_path)
+        payload["repository_path"] = str(validated.preflight.worktree_path)
+        mode = "batch" if worker_profile == "slow-coder" else "immediate"
+        schedule_type = "nightly" if worker_profile == "slow-coder" else "immediate"
+        return self.add_task(
+            values["task_id"],
+            "coding",
+            payload,
+            mode=mode,
+            priority=priority,
+            idempotency_key=values["task_id"],
+            schedule_type=schedule_type,
+        )
 
     def claim_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Atomically claim a task for processing.

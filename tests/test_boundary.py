@@ -11,6 +11,7 @@ from gtx_broker import (
     TaskManifestError,
     validate_task_manifest,
 )
+from gtx_broker.scheduler import Scheduler, SchedulerConfig
 
 
 def make_registry(tmp_path):
@@ -111,6 +112,12 @@ def test_checkout_preflight_requires_clean_owned_branch(tmp_path):
     manifest["worktree_path"] = str(path)
     result = validate_task_manifest(manifest, registry=make_registry(tmp_path))
     assert result.preflight.branch == "automation/task-001"
+
+    scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "tasks.db")))
+    assert scheduler.add_manifest_task(manifest, registry=make_registry(tmp_path))
+    queued = scheduler.get_task("TASK-001")
+    assert queued["state"] == "queued"
+    assert queued["payload"]["worker_profile"] == "p40-coding"
 
     (path / "dirty.txt").write_text("must fail\n")
     with pytest.raises(TaskManifestError, match="clean"):

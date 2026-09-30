@@ -15,6 +15,7 @@ import mimetypes
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -593,10 +594,41 @@ class ReviewHandler(TaskHandler):
         argv = shlex.split(command) if isinstance(command, str) else list(command)
         if not argv:
             return HandlerResult.WORKER_UNAVAILABLE, None
+        schema_path: Optional[Path] = None
+        command_input = json.dumps(task)
+        if worker == "codex-review" and Path(argv[0]).name == "codex":
+            schema_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix="-codex-review.schema.json", delete=False,
+            )
+            json.dump({
+                "type": "object",
+                "properties": {
+                    "passed": {"type": "boolean"},
+                    "findings": {"type": "array", "items": {"type": "object"}},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["passed", "findings"],
+                "additionalProperties": True,
+            }, schema_file)
+            schema_file.close()
+            schema_path = Path(schema_file.name)
+            if "exec" not in argv[1:]:
+                argv.insert(1, "exec")
+            argv.extend([
+                "--cd", str(worktree_path),
+                "--output-schema", str(schema_path),
+            ])
+            command_input = json.dumps({
+                **task,
+                "instruction": (
+                    "Inspect the current worktree without making changes. "
+                    "Return only JSON matching the supplied output schema."
+                ),
+            })
         try:
             before = CodingHandler._git_status(worktree_path)
             completed = subprocess.run(
-                argv, cwd=worktree_path, input=json.dumps(task), capture_output=True,
+                argv, cwd=worktree_path, input=command_input, capture_output=True,
                 text=True, timeout=self.timeout, check=False,
             )
             after = CodingHandler._git_status(worktree_path)
@@ -612,6 +644,9 @@ class ReviewHandler(TaskHandler):
         except (ValueError, KeyError, TypeError) as exc:
             logger.error("%s review output was invalid: %s", worker, exc)
             return HandlerResult.FAILED, None
+        finally:
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
         valid, error = self.validate_output(result)
         if not valid:
             logger.error("%s review output failed validation: %s", worker, error)

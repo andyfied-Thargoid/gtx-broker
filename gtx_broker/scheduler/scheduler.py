@@ -391,7 +391,8 @@ class Scheduler:
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (name, old_value, value, actor, reason, now))
             state = self._control_state_from_cursor(cursor)
-            if name == "planning" and value == "on" and state["p40"] == "ready":
+            if (name == "planning" and old_value != value
+                    and value == "on" and state["p40"] == "ready"):
                 cursor.execute("""
                     INSERT INTO control_events
                         (control, old_value, new_value, actor, reason, created_at)

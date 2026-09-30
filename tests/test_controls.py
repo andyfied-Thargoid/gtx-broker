@@ -92,3 +92,13 @@ def test_p40_ready_is_reported_after_active_task_finishes(tmp_path):
     scheduler.set_control("planning", "on")
     ready = [event for event in scheduler.get_control_events() if event["control"] == "p40_ready"]
     assert len(ready) == 2
+
+
+def test_repeated_planning_on_is_idempotent(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+
+    scheduler.set_control("planning", "on")
+    scheduler.set_control("planning", "on")
+
+    ready = [event for event in scheduler.get_control_events() if event["control"] == "p40_ready"]
+    assert len(ready) == 1

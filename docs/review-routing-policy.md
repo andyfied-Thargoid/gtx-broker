@@ -20,7 +20,9 @@ silently replaced by Air Review.
 ## Deployment boundary
 
 This policy is implemented on the isolated branch
-`feat/codex-review-primary-air-failover`. It is not deployed to the live
-Broker service. Before activation, configure and qualify the Codex review
-command, then verify the Air Review command as the fallback. Existing image
-queue state is unrelated and remains unchanged.
+`feat/codex-review-primary-air-failover` and is active in the live Broker
+worktree through the reversible systemd drop-in
+`gtx-broker.service.d/reviewer-routing.conf`. The service has
+`CODEX_COMMAND`/`CODEX_REVIEW_COMMAND` set to `/home/andyfied/.local/bin/codex`
+and `AIR_REVIEW_COMMAND` set to the existing Air Review executor. Existing
+image queue state is unrelated and remains unchanged.

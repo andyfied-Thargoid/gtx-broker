@@ -193,10 +193,13 @@ class RepositoryRegistry:
             )
             return result.stdout.strip() if result.returncode == 0 else ""
 
-        # Git may use remote.pushDefault, the branch's remote, or origin when
-        # deciding where an ordinary `git push` goes.  Validate that effective
-        # push target, rather than accepting an unrelated approved remote.
-        push_remote_name = optional_git("config", "--get", "remote.pushDefault")
+        # Git resolves an ordinary push target in this order: branch-specific
+        # pushRemote, remote.pushDefault, the branch's remote, then origin.
+        # Validate that effective target, rather than accepting an unrelated
+        # approved remote.
+        push_remote_name = optional_git("config", "--get", f"branch.{branch}.pushRemote")
+        if not push_remote_name:
+            push_remote_name = optional_git("config", "--get", "remote.pushDefault")
         if not push_remote_name:
             push_remote_name = optional_git("config", "--get", f"branch.{branch}.remote")
         push_remote_name = push_remote_name or "origin"

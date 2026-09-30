@@ -768,7 +768,24 @@ class Scheduler:
                             return False
 
                         task_for_validation = self._row_to_dict(row)
-                        task_for_validation["worker_profile"] = worker_profile
+                        try:
+                            task_payload = self._json_load(row["payload"] or "{}")
+                        except (TypeError, ValueError):
+                            conn.rollback()
+                            conn.close()
+                            return False
+                        manifest = (
+                            task_payload.get("manifest")
+                            if isinstance(task_payload, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(manifest, dict)
+                            and manifest.get("worker_profile") != worker_profile
+                        ):
+                            conn.rollback()
+                            conn.close()
+                            return False
                         try:
                             self.validate_manifest_task(task_for_validation)
                         except ValueError:

@@ -138,6 +138,11 @@ def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch)
     assert queued["payload"]["worker_profile"] == "p40-coding"
     assert queued["payload"]["timeout"] == 1800
     assert queued["payload"]["context_size"] == 131072
+    assert scheduler.claim_task("TASK-001") is not None
+    assert not scheduler.start_task("TASK-001", "slow-coder")
+    assert scheduler.get_task("TASK-001")["state"] == "claimed"
+    # The declared P40 worker is the only worker allowed to start this task.
+    assert scheduler.start_task("TASK-001", "p40-coding")
 
     executor = tmp_path / "executor.sh"
     executor.write_text(
@@ -150,8 +155,6 @@ def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch)
     )
     executor.chmod(executor.stat().st_mode | 0o111)
     monkeypatch.setenv("P40_CODING_COMMAND", str(executor))
-    assert scheduler.claim_task("TASK-001") is not None
-    assert scheduler.start_task("TASK-001", "p40-coding")
     task = scheduler.get_task("TASK-001")
     task["worker_profile"] = "p40-coding"
     handler = CodingHandler()
@@ -190,8 +193,10 @@ def test_repository_registry_rejects_unapproved_effective_push_remote(tmp_path):
     (path / "README.md").write_text("# demo\n")
     git("add", ".")
     git("commit", "-qm", "fixture")
-    git("remote", "add", "origin", "https://github.com/other/demo.git")
-    git("remote", "add", "safe", "https://github.com/example/demo.git")
+    git("remote", "add", "origin", "https://github.com/example/demo.git")
+    git("remote", "add", "unapproved", "https://github.com/other/demo.git")
+    git("config", "branch.automation/task-remote.remote", "origin")
+    git("config", "branch.automation/task-remote.pushRemote", "unapproved")
     registry = RepositoryRegistry((OwnedRepository(
         "demo", "https://github.com/example/demo.git", (path,),
         ("https://github.com/example/demo.git",),

@@ -470,11 +470,20 @@ class SchedulerDaemon:
 
             elif result == HandlerResult.RETRY:
                 # Task should retry later
+                handler_result = getattr(handler, "last_result", None)
+                retry_result = dict(handler_result) if isinstance(handler_result, dict) else None
+                retry_failure_class = (
+                    retry_result.get("failure_kind")
+                    if retry_result and isinstance(retry_result.get("failure_kind"), str)
+                    else None
+                )
                 storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
                 if not storage_ready:
                     logger.error("Leaving retrying task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                if not self.scheduler.transition_running_to_retry_wait(
+                    task_id, result=retry_result, failure_class=retry_failure_class,
+                ):
                     logger.error("Storage requeued task %s but scheduler update failed", task_id)
                     return False
                 logger.info(f"Task {task_id} transitioned to retry_wait")
@@ -482,11 +491,20 @@ class SchedulerDaemon:
             elif result == HandlerResult.WORKER_UNAVAILABLE:
                 # Worker not available (e.g., model not loaded)
                 # Mark as retry_wait to retry later
+                handler_result = getattr(handler, "last_result", None)
+                retry_result = dict(handler_result) if isinstance(handler_result, dict) else None
+                retry_failure_class = (
+                    retry_result.get("failure_kind")
+                    if retry_result and isinstance(retry_result.get("failure_kind"), str)
+                    else None
+                )
                 storage_ready = not storage_claimed or self._requeue_staged_input(task_id)
                 if not storage_ready:
                     logger.error("Leaving unavailable task %s running for storage recovery", task_id)
                     return False
-                if not self.scheduler.transition_running_to_retry_wait(task_id):
+                if not self.scheduler.transition_running_to_retry_wait(
+                    task_id, result=retry_result, failure_class=retry_failure_class,
+                ):
                     logger.error("Storage requeued task %s but scheduler update failed", task_id)
                     return False
                 logger.info(f"Task {task_id} transitioned to retry_wait - worker unavailable")

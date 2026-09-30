@@ -196,6 +196,50 @@ class TestDaemonStateMachine:
                 task_data = daemon.scheduler.get_task(task['id'])
                 assert task_data['state'] == 'retry_wait'
 
+    def test_review_unavailability_persists_both_reviewer_attempts(self, daemon):
+        """Codex and Air Review outages remain visible on the retry attempt."""
+        assert daemon.scheduler.add_task(
+            task_id="TEST-004B",
+            kind="coding",
+            payload={"worktree_path": "/tmp/review-worktree"},
+            mode="immediate",
+            priority=10,
+            review_tag=True,
+        )
+        failure_evidence = {
+            "status": "unavailable",
+            "failure_kind": "review_unavailable",
+            "review_attempts": [
+                {"reviewer": "codex-review", "status": "unavailable", "exit_code": 2},
+                {"reviewer": "air-review", "status": "unavailable", "timeout": True},
+            ],
+            "fallback_used": True,
+        }
+
+        with patch.object(daemon, '_get_worker_for_task', return_value='p40-coding'):
+            with patch('gtx_broker.daemon.get_handler_for_task') as mock_get_handler:
+                mock_handler = MagicMock()
+                mock_handler.execute.return_value = HandlerResult.WORKER_UNAVAILABLE
+                mock_handler.last_result = failure_evidence
+                mock_get_handler.return_value = mock_handler
+
+                task = daemon.scheduler.get_next_task()
+                assert daemon._dispatch_task(task) is True
+
+        assert daemon.scheduler.get_task("TEST-004B")["state"] == "retry_wait"
+        conn = daemon.scheduler._get_connection()
+        attempt = conn.execute(
+            "SELECT result, failure_class FROM task_attempts WHERE task_id = ?",
+            ("TEST-004B",),
+        ).fetchone()
+        conn.close()
+        assert attempt["failure_class"] == "review_unavailable"
+        persisted = json.loads(attempt["result"])
+        assert persisted["fallback_used"] is True
+        assert [item["reviewer"] for item in persisted["review_attempts"]] == [
+            "codex-review", "air-review",
+        ]
+
     def test_awaiting_review_transitions_correctly(self, daemon):
         """Test that AWAITING_REVIEW transitions task correctly."""
         # Add a task

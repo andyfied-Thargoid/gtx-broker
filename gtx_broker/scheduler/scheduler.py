@@ -1642,11 +1642,16 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
-    def transition_running_to_retry_wait(self, task_id: str) -> bool:
+    def transition_running_to_retry_wait(
+        self, task_id: str, result: Optional[Dict[str, Any]] = None,
+        failure_class: Optional[str] = None,
+    ) -> bool:
         """Transition running → retry_wait, closing current attempt.
 
         Args:
             task_id: Task ID
+            result: Structured handler result to persist on the closed attempt
+            failure_class: Optional retry classification for the closed attempt
 
         Returns:
             True if transitioned
@@ -1665,8 +1670,16 @@ class Scheduler:
                 conn.close()
                 return False
 
-            # Close current attempt before transitioning
-            self._close_current_attempt(task_id)
+            # Close and annotate the current attempt in the same transaction
+            # as the state transition so retry evidence cannot be lost.
+            cursor.execute("""
+                UPDATE task_attempts SET end_at = ?, result = ?, failure_class = ?
+                WHERE task_id = ? AND end_at IS NULL
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+                self._json_dump(result) if result is not None else None,
+                failure_class, task_id,
+            ))
 
             to_state = "retry_wait"
             cursor.execute("""

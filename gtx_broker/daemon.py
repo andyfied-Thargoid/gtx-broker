@@ -485,8 +485,12 @@ class SchedulerDaemon:
                 handler_result = getattr(handler, "last_result", None)
                 review_result = {
                     "status": "awaiting_review",
+                    "handler_result": handler_result if isinstance(handler_result, dict) else None,
                     "vision_result": handler_result if isinstance(handler_result, dict) else None,
                 }
+                manifest = (task.get("payload") or {}).get("manifest")
+                if isinstance(manifest, dict):
+                    review_result["review_policy"] = manifest.get("review_policy")
                 storage_ready = not storage_claimed or self._complete_staged_input(
                     task_id, review_result, "awaiting_review"
                 )

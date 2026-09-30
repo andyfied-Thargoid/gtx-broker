@@ -495,6 +495,16 @@ class CodingHandler(TaskHandler):
         if not changed and not payload.get("allow_no_change", False):
             self.last_result["status"] = "failed_no_change"
             return HandlerResult.FAILED
+        # Manifest tasks are deliberately not terminally successful here.
+        # Their contract requires Air Review, Codex final review, and PR
+        # approval before production activation. The daemon persists this
+        # result as awaiting_review so an implementation cannot bypass those
+        # gates merely by exiting successfully.
+        manifest = payload.get("manifest")
+        if isinstance(manifest, dict) and manifest.get("review_policy"):
+            self.last_result["status"] = "awaiting_review"
+            self.last_result["review_policy"] = dict(manifest["review_policy"])
+            return HandlerResult.AWAITING_REVIEW
         return HandlerResult.SUCCESS
 
     @staticmethod

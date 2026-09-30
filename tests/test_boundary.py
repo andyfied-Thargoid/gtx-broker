@@ -136,6 +136,8 @@ def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch)
     queued = scheduler.get_task("TASK-001")
     assert queued["state"] == "queued"
     assert queued["payload"]["worker_profile"] == "p40-coding"
+    assert queued["payload"]["timeout"] == 1800
+    assert queued["payload"]["context_size"] == 131072
 
     executor = tmp_path / "executor.sh"
     executor.write_text(
@@ -154,9 +156,9 @@ def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch)
     task["worker_profile"] = "p40-coding"
     handler = CodingHandler()
     result = handler.execute(task)
-    assert result == HandlerResult.SUCCESS, handler.last_result
-    assert scheduler.complete_task("TASK-001", result={"status": "success"})
-    assert scheduler.get_task("TASK-001")["state"] == "succeeded"
+    assert result == HandlerResult.AWAITING_REVIEW, handler.last_result
+    assert scheduler.transition_running_to_awaiting_review("TASK-001")
+    assert scheduler.get_task("TASK-001")["state"] == "awaiting_review"
 
     (path / "dirty.txt").write_text("must fail\n")
     with pytest.raises(TaskManifestError, match="clean"):
@@ -167,3 +169,33 @@ def test_repository_registry_rejects_cross_repo_remote(tmp_path):
     registry = make_registry(tmp_path)
     with pytest.raises(RepositoryBoundaryError):
         registry.validate_checkout("demo", tmp_path / "demo", expected_remote="https://github.com/other/repo.git")
+
+
+def test_repository_registry_rejects_unapproved_effective_push_remote(tmp_path):
+    path = tmp_path / "demo"
+    path.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(path), *args], check=True,
+            capture_output=True, text=True,
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "tests@example.invalid")
+    git("config", "user.name", "Boundary Tests")
+    git("switch", "-c", "automation/task-remote")
+    (path / "README.md").write_text("# demo\n")
+    git("add", ".")
+    git("commit", "-qm", "fixture")
+    git("remote", "add", "origin", "https://github.com/other/demo.git")
+    git("remote", "add", "safe", "https://github.com/example/demo.git")
+    registry = RepositoryRegistry((OwnedRepository(
+        "demo", "https://github.com/example/demo.git", (path,),
+        ("https://github.com/example/demo.git",),
+    ),))
+
+    with pytest.raises(RepositoryBoundaryError, match="push remote"):
+        registry.validate_checkout(
+            "demo", path, expected_remote="https://github.com/example/demo.git"
+        )

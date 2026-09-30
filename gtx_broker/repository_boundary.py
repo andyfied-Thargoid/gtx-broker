@@ -71,6 +71,7 @@ class RepositoryPreflight:
     worktree_path: Path
     remotes: tuple[str, ...]
     branch: str
+    push_remote: str
 
 
 class RepositoryRegistry:
@@ -178,12 +179,55 @@ class RepositoryRegistry:
             fields = line.split()
             if len(fields) >= 2 and fields[1] not in remotes:
                 remotes.append(fields[1])
-        if not remotes or not any(repository.matches_remote(remote) for remote in remotes):
+        if not remotes:
+            raise RepositoryBoundaryError(
+                f"checkout has no configured remote for owned repository {name}"
+            )
+
+        def optional_git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(path), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+
+        # Git may use remote.pushDefault, the branch's remote, or origin when
+        # deciding where an ordinary `git push` goes.  Validate that effective
+        # push target, rather than accepting an unrelated approved remote.
+        push_remote_name = optional_git("config", "--get", "remote.pushDefault")
+        if not push_remote_name:
+            push_remote_name = optional_git("config", "--get", f"branch.{branch}.remote")
+        push_remote_name = push_remote_name or "origin"
+        if push_remote_name == ".":
+            raise RepositoryBoundaryError("checkout push target is the local repository")
+        push_urls = optional_git("config", "--get-all", f"remote.{push_remote_name}.pushurl")
+        if push_urls:
+            push_urls = push_urls.splitlines()
+        else:
+            push_urls = optional_git("config", "--get-all", f"remote.{push_remote_name}.url")
+            push_urls = push_urls.splitlines() if push_urls else []
+        if not push_urls:
+            raise RepositoryBoundaryError(
+                f"push remote {push_remote_name} has no configured push URL"
+            )
+        if not all(repository.matches_remote(remote) for remote in push_urls):
+            raise RepositoryBoundaryError(
+                f"push remote {push_remote_name} is not approved for owned repository {name}"
+            )
+        if expected_remote is not None:
+            expected = normalize_remote(expected_remote)
+            if not repository.matches_remote(expected_remote) or any(
+                normalize_remote(remote) != expected for remote in push_urls
+            ):
+                raise RepositoryBoundaryError(
+                    "manifest remote must match the configured push remote"
+                )
+        if not any(repository.matches_remote(remote) for remote in remotes):
             raise RepositoryBoundaryError(
                 f"no configured remote belongs to owned repository {name}"
             )
-        if expected_remote is not None and not repository.matches_remote(expected_remote):
-            raise RepositoryBoundaryError(
-                f"manifest remote is not allowed for owned repository {name}"
-            )
-        return RepositoryPreflight(repository, path, tuple(remotes), branch)
+        return RepositoryPreflight(
+            repository, path, tuple(remotes), branch, push_urls[0]
+        )

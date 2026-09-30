@@ -29,3 +29,8 @@ enabled; `check_worktree=False` is only for schema/unit tests.
 The boundary does not grant permission to modify host configuration or another
 repository. Workstation deployment, systemd, model profiles, and sandbox
 configuration remain workstation-owned.
+
+After a manifest coding handler succeeds, the broker records the task as
+`awaiting_review`, not `succeeded`. The required Air Review, Codex final review,
+and pull-request approval must be recorded by the review workflow before the
+task is approved for production activation.

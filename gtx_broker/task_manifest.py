@@ -210,4 +210,7 @@ def _validate_declared_boundary(
         raise TaskManifestError(
             f"manifest remote is not allowed for owned repository {repository.name}"
         )
-    return RepositoryPreflight(repository, path, (values["repository_remote"],), values["branch"])
+    return RepositoryPreflight(
+        repository, path, (values["repository_remote"],), values["branch"],
+        values["repository_remote"],
+    )

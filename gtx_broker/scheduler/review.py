@@ -48,6 +48,10 @@ class VisionReviewService:
         task = self.scheduler.get_task(task_id)
         if not task or task.get("state") != "awaiting_review":
             return False
+        if status == "approved" and (task.get("payload") or {}).get("manifest"):
+            # The generic vision-review endpoint cannot satisfy the manifest's
+            # Air Review -> Codex -> PR approval chain.
+            return False
         decision = {
             "status": status,
             "reviewer": reviewer.strip(),

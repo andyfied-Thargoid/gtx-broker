@@ -47,9 +47,9 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
 
-        if parsed.path.startswith("/status/"):
+        if parsed.path.startswith("/status/") or parsed.path.startswith("/tasks/"):
             # Get single task status
-            task_id = urllib.parse.unquote(parsed.path[len("/status/"):])
+            task_id = urllib.parse.unquote(parsed.path.split("/")[-1])
             self._handle_task_status(task_id)
         elif parsed.path == "/queue":
             # Get queue statistics or position
@@ -69,6 +69,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             self._handle_cancel()
         elif self.path == "/controls":
             self._handle_controls_post()
+        elif self.path == "/tasks" or self.path.startswith("/tasks/"):
+            self._handle_task_submission()
         else:
             self._send_error_response("Not found", 404)
 
@@ -78,10 +80,19 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         if not task:
             self._send_error_response("Task not found", 404)
             return
-
+        
         # Get recent events
         events = self.scheduler.get_task_events(task_id, limit=5)
-
+        
+        # Get storage metadata (includes result when available)
+        try:
+            from gtx_broker.scheduler.storage import StorageContract
+            storage = StorageContract(Path(self.scheduler.config.db_path).parent.parent)
+            storage_metadata = storage.get_task(task_id)
+        except Exception as e:
+            logger.warning(f"Could not load storage metadata: {e}")
+            storage_metadata = None
+        
         response = {
             "task_id": task_id,
             "state": task.get("state"),
@@ -94,6 +105,9 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             "updated_at": task.get("updated_at"),
             "controls": self.scheduler.get_control_state(),
             "events": events,
+            "storage_status": storage_metadata.get("status") if storage_metadata else None,
+            "result": storage_metadata.get("result") if storage_metadata else None,
+            "completion_pending": storage_metadata.get("completion_pending") if storage_metadata else None,
         }
         self._send_json_response(response)
 
@@ -258,6 +272,90 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             })
         else:
             self._send_error_response("Cancellation failed", 500)
+
+    def _handle_task_submission(self):
+        """Submit a new image task for processing.
+        
+        POST /tasks
+        {
+            "image_path": "/path/to/image.jpg",
+            "source_chat": 123456,
+            "source_message": 789,
+            "schema": "image_description",
+            "requires_review": false
+        }
+        
+        Response:
+        {
+            "task_id": "uuid",
+            "status": "queued",
+            "message": "Image received and queued for identification"
+        }
+        """
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_response("Request body required", 400)
+            return
+        
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_error_response("Invalid JSON", 400)
+            return
+        
+        # Validate required fields
+        image_path = data.get("image_path")
+        if not image_path:
+            self._send_error_response("image_path required", 400)
+            return
+        
+        # Check if file exists
+        from pathlib import Path
+        path = Path(image_path)
+        if not path.exists():
+            self._send_error_response(f"Image file not found: {image_path}", 404)
+            return
+        
+        # Create task ID
+        import uuid
+        task_id = str(uuid.uuid4())
+        
+        # Prepare task payload
+        payload = {
+            "image_path": image_path,
+            "source": {
+                "chat_id": str(data.get("source_chat", "")),
+                "message_id": str(data.get("source_message", "")),
+                "user_id": str(data.get("user_id", "")),
+                "caption": data.get("caption", ""),
+            },
+            "schema": data.get("schema", "image_description"),
+            "requires_review": data.get("requires_review", False),
+        }
+        
+        # Add task to scheduler
+        added = self.scheduler.add_task(
+            task_id,
+            "vision",
+            payload,
+            mode="vision",
+            schedule_type="nightly",
+            priority=50,
+            input_path=image_path,
+        )
+        
+        if not added:
+            self._send_error_response("Failed to add task to scheduler", 500)
+            return
+        
+        # Return queued status
+        self._send_json_response({
+            "task_id": task_id,
+            "status": "queued",
+            "message": "Image received and queued for identification",
+            "queue_position": 1,  # Will be recalculated by queue position endpoint
+        })
 
 
 class StatusAPI:

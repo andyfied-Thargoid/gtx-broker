@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 import sqlite3
 from pathlib import Path
+import os
 
 
 class WorkerStatus(Enum):
@@ -404,3 +405,20 @@ def initialize_workers(db_path: Path):
     for worker in DEFAULT_WORKERS:
         # Use INSERT only, not REPLACE, to preserve existing status
         registry._insert_worker(worker)
+
+    # Reviewer profiles are command-backed rather than endpoint-backed. Make
+    # their persisted availability follow the configured command on startup,
+    # while preserving BUSY/MAINTENANCE states for an operator-controlled
+    # profile.
+    configured = {
+        "codex-review": bool(
+            (os.getenv("CODEX_REVIEW_COMMAND") or os.getenv("CODEX_COMMAND") or "").strip()
+        ),
+        "air-review": bool((os.getenv("AIR_REVIEW_COMMAND") or "").strip()),
+    }
+    for profile, available in configured.items():
+        current = registry.get_worker(profile)
+        if current and current.status in {WorkerStatus.AVAILABLE, WorkerStatus.UNAVAILABLE}:
+            registry.update_status(
+                profile, WorkerStatus.AVAILABLE if available else WorkerStatus.UNAVAILABLE
+            )

@@ -391,6 +391,8 @@ class BacklogExecutionAdapter:
         if "exec" not in parts[1:]:
             parts.insert(1, "exec")
         parts.extend(["--cd", worktree])
+        if "--ephemeral" not in parts:
+            parts.append("--ephemeral")
         if gate is not None:
             parts.extend(["--output-schema", str(self._codex_schema_path(gate))])
         return parts

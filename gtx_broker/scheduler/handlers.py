@@ -615,6 +615,7 @@ class ReviewHandler(TaskHandler):
             if "exec" not in argv[1:]:
                 argv.insert(1, "exec")
             argv.extend([
+                "--ephemeral",
                 "--cd", str(worktree_path),
                 "--output-schema", str(schema_path),
             ])

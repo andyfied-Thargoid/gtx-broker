@@ -623,7 +623,9 @@ class ReviewHandler(TaskHandler):
                 **task,
                 "instruction": (
                     "Inspect the current worktree without making changes. "
-                    "Return only JSON matching the supplied output schema."
+                    "Return only JSON matching the supplied output schema. "
+                    "Do not run pytest or other commands that require a "
+                    "writable temporary directory."
                 ),
             })
         try:

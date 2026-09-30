@@ -425,7 +425,9 @@ class BacklogExecutionAdapter:
             "gate": gate, "request": asdict(request), "worker": asdict(worker_result),
             "verification": asdict(verification),
             "output_schema": {"passed": "boolean", "findings": ["string"], "evidence": ["string"]},
-            "instruction": "Inspect the current worktree and emit only JSON matching the schema. passed must be false when findings remain.",
+            "instruction": "Inspect the current worktree and emit only JSON matching the schema. "
+            "Do not run pytest or other commands requiring writable temporary storage. "
+            "passed must be false when findings remain.",
         }, indent=2, sort_keys=True)
         try:
             completed = subprocess.run(

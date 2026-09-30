@@ -159,6 +159,8 @@ def test_manifest_task_executes_and_accepts_a_real_commit(tmp_path, monkeypatch)
     assert result == HandlerResult.AWAITING_REVIEW, handler.last_result
     assert scheduler.transition_running_to_awaiting_review("TASK-001")
     assert scheduler.get_task("TASK-001")["state"] == "awaiting_review"
+    assert not scheduler.approve_awaiting_review("TASK-001")
+    assert scheduler.get_task("TASK-001")["state"] == "awaiting_review"
 
     (path / "dirty.txt").write_text("must fail\n")
     with pytest.raises(TaskManifestError, match="clean"):

@@ -31,6 +31,7 @@ repository. Workstation deployment, systemd, model profiles, and sandbox
 configuration remain workstation-owned.
 
 After a manifest coding handler succeeds, the broker records the task as
-`awaiting_review`, not `succeeded`. The required Air Review, Codex final review,
-and pull-request approval must be recorded by the review workflow before the
-task is approved for production activation.
+`awaiting_review`, not `succeeded`. The generic vision-review approval endpoint
+cannot promote a manifest task. Production activation remains deliberately
+deferred until the required Air Review, Codex final review, and pull-request
+approval workflow is integrated.

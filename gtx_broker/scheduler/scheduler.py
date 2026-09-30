@@ -1535,9 +1535,19 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT state, payload FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row or row["state"] != "awaiting_review":
+                conn.close()
+                return False
+            # Manifest coding tasks remain deferred until the dedicated
+            # Air/Codex/PR evidence workflow exists. Do not let the generic
+            # vision-review approval endpoint bypass that contract.
+            try:
+                payload = self._json_load(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if isinstance(payload, dict) and payload.get("manifest"):
                 conn.close()
                 return False
             cursor.execute(

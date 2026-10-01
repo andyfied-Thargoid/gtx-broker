@@ -61,8 +61,12 @@ def test_vault_tools_integration():
         assert "Absolute paths are not allowed" in result.error
 
 
-def test_repo_tools_integration():
+def test_repo_tools_integration(tmp_path, monkeypatch):
     """Test that RepositoryTools Hermes tools can be instantiated."""
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "README.md").write_text("checkout README")
+    monkeypatch.setenv("GTX_BROKER_SOURCE_ROOT", str(tmp_path))
     tools = RepositoryTools(github_token=None)
 
     definitions = tools.get_definitions()

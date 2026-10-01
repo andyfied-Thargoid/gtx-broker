@@ -39,7 +39,8 @@ def test_discovery_reports_successes_and_failures_for_all_configured_repositorie
 
     tools = RepositoryTools(registry_path=str(registry_path))
     result = tools.discover_readmes()
-    assert result.success, result.error
+    assert not result.success
+    assert "Repository path does not exist" in result.error
     data = {item["repo"]: item for item in json.loads(result.content)}
     assert set(data) == {"first", "second", "missing"}
     assert data["first"]["status"] == "ok"
@@ -229,3 +230,234 @@ def test_vault_permission_failures_are_not_successful_empty_results(monkeypatch,
     result = tools.search_vault("*.md")
     assert not result.success
     assert "Permission denied" in result.error
+
+
+def test_nested_readme_can_be_read_through_repository_tool(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / "docs").mkdir(parents=True)
+    (repository / "docs" / "README.rst").write_text("nested content")
+    registry_path = _write_registry(tmp_path / "repositories.json", {"repo": str(repository)})
+
+    result = RepositoryTools(registry_path=str(registry_path)).read_readme(
+        "repo", readme_path="docs/README.rst"
+    )
+
+    assert result.success, result.error
+    assert result.content == "nested content"
+    assert result.metadata["readme_file"] == "docs/README.rst"
+
+
+def test_get_all_readmes_uses_repository_and_path_keys(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / "docs").mkdir(parents=True)
+    (repository / "README.md").write_text("root")
+    (repository / "docs" / "README.rst").write_text("nested")
+
+    readmes = RepositoryReadmeReader(
+        RepositoryRegistry({"repo": str(repository)})
+    ).get_all_readmes()
+
+    assert readmes == {
+        "repo:README.md": "root",
+        "repo:docs/README.rst": "nested",
+    }
+
+
+def test_nested_remote_readme_can_be_read_exactly(monkeypatch):
+    requested = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "path": "docs/README.rst",
+                "content": base64.b64encode(b"remote nested").decode(),
+            }
+
+    def fake_get(url, headers, timeout, **kwargs):
+        requested.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr("gtx_broker.repo_readers.requests.get", fake_get)
+    readme = RepositoryReadmeReader(
+        RepositoryRegistry({"demo": "https://github.com/example/demo"}),
+        github_token="x",
+    ).get_readme("demo", readme_path="docs/README.rst")
+
+    assert readme is not None
+    assert readme.error is None
+    assert readme.readme_path == "docs/README.rst"
+    assert readme.content == "remote nested"
+    assert requested[0][0] == "https://api.github.com/repos/example/demo/contents/docs/README.rst"
+
+
+def test_authorized_repositories_with_duplicate_names_remain_distinct(tmp_path, monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return [
+                {"name": "shared", "full_name": "one/shared", "clone_url": "https://github.com/one/shared.git"},
+                {"name": "shared", "full_name": "two/shared", "clone_url": "https://github.com/two/shared.git"},
+            ]
+
+    monkeypatch.setattr("gtx_broker.repo_readers.requests.get", lambda *args, **kwargs: Response())
+
+    registry = RepositoryRegistry.discover(source_root=tmp_path, github_token="x")
+
+    assert registry.repositories == {
+        "one/shared": "https://github.com/one/shared.git",
+        "two/shared": "https://github.com/two/shared.git",
+    }
+
+
+def test_github_discovery_failure_is_explicit_in_repository_tool(tmp_path, monkeypatch):
+    class Response:
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {"message": "forbidden"}
+
+    monkeypatch.setattr("gtx_broker.repo_readers.requests.get", lambda *args, **kwargs: Response())
+    tools = RepositoryTools(github_token="x")
+    monkeypatch.setenv("GTX_BROKER_SOURCE_ROOT", str(tmp_path))
+
+    result = tools.discover_readmes()
+
+    assert not result.success
+    assert "GitHub repository discovery failed: HTTP 403" in result.error
+
+
+def test_truncated_remote_tree_is_reported_as_incomplete(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, headers, timeout, **kwargs):
+        if url == "https://api.github.com/repos/example/demo":
+            return Response({"default_branch": "main"})
+        return Response({"truncated": True, "tree": []})
+
+    monkeypatch.setattr("gtx_broker.repo_readers.requests.get", fake_get)
+    reader = RepositoryReadmeReader(
+        RepositoryRegistry({"demo": "https://github.com/example/demo"}),
+        github_token="x",
+    )
+
+    readmes = reader.discover_readmes()
+
+    assert len(readmes) == 1
+    assert readmes[0].error == "GitHub repository tree is truncated; README discovery is incomplete"
+
+
+def test_summary_counts_repositories_and_can_omit_previews(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / "docs").mkdir(parents=True)
+    (repository / "README.md").write_text("root")
+    (repository / "docs" / "README.rst").write_text("nested")
+
+    summary = RepositoryReadmeReader(
+        RepositoryRegistry({"repo": str(repository)})
+    ).get_summary(include_previews=False)
+
+    assert summary["total_repos"] == 1
+    assert summary["total_readmes"] == 2
+    assert summary["successful"] == 1
+    assert summary["failed"] == 0
+    assert all("preview" not in item for item in summary["readmes"])
+
+
+def test_repository_tool_summary_fails_on_truncated_remote_tree(tmp_path, monkeypatch):
+    registry_path = _write_registry(
+        tmp_path / "repositories.json",
+        {"demo": "https://github.com/example/demo"},
+    )
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, headers, timeout, **kwargs):
+        if url == "https://api.github.com/repos/example/demo":
+            return Response({"default_branch": "main"})
+        return Response({"truncated": True, "tree": []})
+
+    monkeypatch.setattr("gtx_broker.repo_readers.requests.get", fake_get)
+    result = RepositoryTools(
+        github_token="x", registry_path=str(registry_path)
+    ).get_summary()
+
+    assert not result.success
+    assert "truncated" in result.error
+
+
+def test_repository_tool_accepts_nested_path_as_second_positional_argument(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / "docs").mkdir(parents=True)
+    (repository / "README.md").write_text("root")
+    (repository / "docs" / "README.rst").write_text("nested")
+    registry_path = _write_registry(tmp_path / "repositories.json", {"repo": str(repository)})
+
+    result = RepositoryTools(registry_path=str(registry_path)).read_readme(
+        "repo", "docs/README.rst"
+    )
+
+    assert result.success, result.error
+    assert result.content == "nested"
+
+
+def test_symlinked_repository_root_is_rejected(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "README.md").write_text("secret")
+    link = tmp_path / "repo-link"
+    link.symlink_to(target, target_is_directory=True)
+
+    readmes = RepositoryReadmeReader(
+        RepositoryRegistry({"repo": str(link)})
+    ).discover_readmes()
+
+    assert len(readmes) == 1
+    assert "symlink" in readmes[0].error.lower()
+
+
+def test_empty_readme_is_a_successful_exact_read(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "README.md").write_text("")
+    registry_path = _write_registry(tmp_path / "repositories.json", {"repo": str(repository)})
+
+    result = RepositoryTools(registry_path=str(registry_path)).read_readme(
+        "repo", readme_path="README.md"
+    )
+
+    assert result.success
+    assert result.content == ""
+    assert result.error is None
+
+
+def test_empty_readme_path_does_not_reuse_cached_root_readme(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "README.md").write_text("root")
+    reader = RepositoryReadmeReader(RepositoryRegistry({"repo": str(repository)}))
+
+    root = reader.get_readme("repo")
+    invalid = reader.get_readme("repo", readme_path="")
+
+    assert root.content == "root"
+    assert invalid.error == "Invalid README path: "

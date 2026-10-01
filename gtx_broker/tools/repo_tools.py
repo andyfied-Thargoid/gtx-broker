@@ -76,6 +76,10 @@ class RepositoryTools:
                             "type": "string",
                             "description": "Repository name from registry",
                         },
+                        "readme_path": {
+                            "type": "string",
+                            "description": "Exact README* path returned by discovery (optional)",
+                        },
                         "refresh": {
                             "type": "boolean",
                             "description": "Force re-read even if cached",
@@ -109,6 +113,8 @@ class RepositoryTools:
 
         try:
             registry = self._registry()
+            if registry.discovery_error:
+                return ToolResult(success=False, error=registry.discovery_error)
             reader = RepositoryReadmeReader(registry, self.github_token)
             readmes = reader.discover_readmes()
 
@@ -123,15 +129,12 @@ class RepositoryTools:
                 }
                 for r in readmes
             ]
-            permission_errors = [
-                item["error"] for item in data
-                if item["error"] and "permission" in item["error"].lower()
-            ]
+            errors = [item["error"] for item in data if item["error"]]
 
             return ToolResult(
-                success=not permission_errors,
+                success=not errors,
                 content=json.dumps(data, indent=2),
-                error=("; ".join(permission_errors) if permission_errors else None),
+                error=("; ".join(errors) if errors else None),
                 metadata={"count": len(data)},
             )
         except Exception as e:
@@ -140,16 +143,29 @@ class RepositoryTools:
                 error=f"Discovery error: {e}",
             )
 
-    def read_readme(self, repo_name: str, refresh: bool = False) -> ToolResult:
-        """Read README from specific repo."""
+    def read_readme(
+        self,
+        repo_name: str,
+        readme_path: Optional[str] = None,
+        refresh: bool = False,
+    ) -> ToolResult:
+        """Read a root or exact nested README from a specific repository."""
         from ..repo_readers import RepositoryReadmeReader
 
         try:
+            # Preserve the original read_readme(repo_name, refresh) positional form.
+            if isinstance(readme_path, bool):
+                refresh = readme_path
+                readme_path = None
             registry = self._registry()
+            if registry.discovery_error:
+                return ToolResult(success=False, error=registry.discovery_error)
             reader = RepositoryReadmeReader(registry, self.github_token)
-            readme = reader.get_readme(repo_name, force_refresh=refresh)
+            readme = reader.get_readme(
+                repo_name, force_refresh=refresh, readme_path=readme_path
+            )
 
-            if readme and readme.content and not readme.error:
+            if readme is not None and not readme.error:
                 return ToolResult(
                     success=True,
                     content=readme.content,
@@ -178,12 +194,20 @@ class RepositoryTools:
 
         try:
             registry = self._registry()
+            if registry.discovery_error:
+                return ToolResult(success=False, error=registry.discovery_error)
             reader = RepositoryReadmeReader(registry, self.github_token)
-            summary = reader.get_summary()
+            summary = reader.get_summary(include_previews=include_previews)
+            summary_errors = [
+                item["error"]
+                for item in summary["readmes"]
+                if item["status"] == "error"
+            ]
 
             return ToolResult(
-                success=True,
+                success=not summary_errors,
                 content=json.dumps(summary, indent=2),
+                error=("; ".join(summary_errors) if summary_errors else None),
             )
         except Exception as e:
             return ToolResult(

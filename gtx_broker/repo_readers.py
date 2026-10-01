@@ -41,6 +41,7 @@ class RepositoryRegistry:
     repositories: Dict[str, str] = field(default_factory=dict)  # name -> path or URL
     github_token: Optional[str] = None
     last_updated: Optional[str] = None
+    discovery_error: Optional[str] = None
 
     @classmethod
     def from_file(cls, path: str | Path) -> "RepositoryRegistry":
@@ -85,6 +86,7 @@ class RepositoryRegistry:
                 if checkout.is_dir() and (checkout / ".git").exists():
                     repositories[checkout.name] = str(checkout)
 
+        discovery_error = None
         if github_token:
             headers = {
                 "Accept": "application/vnd.github+json",
@@ -92,20 +94,31 @@ class RepositoryRegistry:
             }
             page = 1
             while True:
-                response = requests.get(
-                    "https://api.github.com/user/repos",
-                    headers=headers,
-                    params={"per_page": 100, "page": page},
-                    timeout=30,
-                )
+                try:
+                    response = requests.get(
+                        "https://api.github.com/user/repos",
+                        headers=headers,
+                        params={"per_page": 100, "page": page},
+                        timeout=30,
+                    )
+                except requests.RequestException as exc:
+                    discovery_error = f"GitHub repository discovery failed: {exc}"
+                    logger.warning(discovery_error)
+                    break
                 if response.status_code != 200:
-                    logger.warning("GitHub repository discovery failed: %s", response.status_code)
+                    discovery_error = f"GitHub repository discovery failed: HTTP {response.status_code}"
+                    logger.warning(discovery_error)
                     break
                 page_repositories = response.json()
                 if not isinstance(page_repositories, list):
+                    discovery_error = "GitHub repository discovery returned an invalid response"
                     break
                 for repository in page_repositories:
-                    name = repository.get("name")
+                    name = repository.get("full_name")
+                    if not name:
+                        owner = (repository.get("owner") or {}).get("login")
+                        short_name = repository.get("name")
+                        name = f"{owner}/{short_name}" if owner and short_name else short_name
                     location = repository.get("clone_url") or repository.get("html_url")
                     if isinstance(name, str) and isinstance(location, str):
                         repositories.setdefault(name, location)
@@ -113,7 +126,12 @@ class RepositoryRegistry:
                     break
                 page += 1
 
-        return cls(repositories, github_token=github_token, last_updated=datetime.now().isoformat())
+        return cls(
+            repositories,
+            github_token=github_token,
+            last_updated=datetime.now().isoformat(),
+            discovery_error=discovery_error,
+        )
 
 
 class RepositoryReadmeReader:
@@ -182,7 +200,8 @@ class RepositoryReadmeReader:
         )
 
     def _read_repo_readme(self, repo_name: str, repo_location: str,
-                          force_refresh: bool = False) -> Optional[RepositoryReadme]:
+                          force_refresh: bool = False,
+                          readme_path: Optional[str] = None) -> Optional[RepositoryReadme]:
         """Read README from a single repository.
 
         Args:
@@ -194,7 +213,8 @@ class RepositoryReadmeReader:
             RepositoryReadme or None if error
         """
         # Check cache
-        cache_key = f"{repo_name}:{repo_location}"
+        requested_path = "<root>" if readme_path is None else readme_path
+        cache_key = f"{repo_name}:{repo_location}:{requested_path}"
         if cache_key in self._cache and not force_refresh:
             cached = self._cache[cache_key]
             timestamp = self._cache_timestamps.get(cache_key)
@@ -207,9 +227,9 @@ class RepositoryReadmeReader:
 
         try:
             if is_local:
-                readme = self._read_local_readme(repo_name, repo_location)
+                readme = self._read_local_readme(repo_name, repo_location, readme_path)
             else:
-                readme = self._read_remote_readme(repo_name, repo_location)
+                readme = self._read_remote_readme(repo_name, repo_location, readme_path)
 
         except Exception as e:
             logger.warning(f"Failed to read README for {repo_name}: {e}")
@@ -228,7 +248,9 @@ class RepositoryReadmeReader:
         self._cache_timestamps[cache_key] = datetime.now()
         return readme
 
-    def _read_local_readme(self, repo_name: str, repo_path: str) -> RepositoryReadme:
+    def _read_local_readme(
+        self, repo_name: str, repo_path: str, readme_path: Optional[str] = None
+    ) -> RepositoryReadme:
         """Read README from local repository.
 
         Args:
@@ -238,15 +260,64 @@ class RepositoryReadmeReader:
         Returns:
             RepositoryReadme
         """
+        if readme_path is not None:
+            try:
+                parts = self._validate_readme_path(readme_path)
+                content = self._read_local_file_no_follow(
+                    Path(repo_path).joinpath(*parts[:-1]), parts[-1]
+                )
+                return RepositoryReadme(
+                    repo_name=repo_name,
+                    repo_path=repo_path,
+                    readme_path=readme_path,
+                    content=content,
+                    content_hash=self._compute_hash(content),
+                    last_read=datetime.now().isoformat(),
+                    is_local=True,
+                )
+            except PermissionError as exc:
+                return self._error_readme(
+                    repo_name, repo_path, True,
+                    f"Permission denied reading {readme_path}: {exc}", readme_path,
+                )
+            except OSError as exc:
+                error = (
+                    "README resolves through a symlink"
+                    if exc.errno in {40, 20}
+                    else f"Unable to read {readme_path}: {exc}"
+                )
+                return self._error_readme(repo_name, repo_path, True, error, readme_path)
+            except ValueError as exc:
+                return self._error_readme(repo_name, repo_path, True, str(exc), readme_path)
+
         readmes = self._read_local_readmes(repo_name, repo_path)
         for readme in readmes:
             if readme.readme_path == "README.md":
                 return readme
         return readmes[0]
 
+    @staticmethod
+    def _validate_readme_path(readme_path: str) -> tuple[str, ...]:
+        path = Path(readme_path)
+        parts = path.parts
+        if (
+            not readme_path
+            or path.is_absolute()
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
+            or not parts[-1].lower().startswith("readme")
+        ):
+            raise ValueError(f"Invalid README path: {readme_path}")
+        return parts
+
     def _read_local_readmes(self, repo_name: str, repo_path: str) -> List[RepositoryReadme]:
         """Read every README* file below a local repository without following symlinks."""
         root = Path(repo_path)
+        if root.is_symlink():
+            return [self._error_readme(
+                repo_name, repo_path, True,
+                "Repository path resolves through a symlink",
+            )]
         if not root.exists() or not root.is_dir():
             return [self._error_readme(
                 repo_name, repo_path, True,
@@ -398,8 +469,15 @@ class RepositoryReadmeReader:
                 f"GitHub tree lookup failed: HTTP {tree_response.status_code}",
             )]
 
+        tree_payload = tree_response.json()
+        if tree_payload.get("truncated") is True:
+            return [self._error_readme(
+                repo_name, repo_url, False,
+                "GitHub repository tree is truncated; README discovery is incomplete",
+            )]
+
         readmes: List[RepositoryReadme] = []
-        tree = tree_response.json().get("tree", [])
+        tree = tree_payload.get("tree", [])
         for item in tree:
             path = item.get("path", "")
             if item.get("type") != "blob" or not Path(path).name.lower().startswith("readme"):
@@ -452,7 +530,9 @@ class RepositoryReadmeReader:
         owner, repo = path.split("/", 1)
         return owner, repo
 
-    def _read_remote_readme(self, repo_name: str, repo_url: str) -> RepositoryReadme:
+    def _read_remote_readme(
+        self, repo_name: str, repo_url: str, readme_path: Optional[str] = None
+    ) -> RepositoryReadme:
         """Read README from remote GitHub repository via API.
 
         Args:
@@ -499,12 +579,51 @@ class RepositoryReadmeReader:
                 error=f"Failed to parse GitHub URL: {e}",
             )
 
-        # Use GitHub API
-        url = f"https://api.github.com/repos/{owner}/{repo}/readme"
         headers = {
             "Accept": "application/vnd.github.v3+json",
             "Authorization": f"token {self.github_token}",
         }
+
+        if readme_path is not None:
+            try:
+                parts = self._validate_readme_path(readme_path)
+            except ValueError as exc:
+                return self._error_readme(repo_name, repo_url, False, str(exc), readme_path)
+            url = (
+                f"https://api.github.com/repos/{owner}/{repo}/contents/"
+                f"{quote('/'.join(parts), safe='/')}"
+            )
+            try:
+                response = requests.get(url, headers=headers, timeout=30)
+                if response.status_code != 200:
+                    return self._error_readme(
+                        repo_name, repo_url, False,
+                        f"GitHub README API error: {response.status_code}", readme_path,
+                    )
+                payload = response.json()
+                if payload.get("path") != readme_path:
+                    return self._error_readme(
+                        repo_name, repo_url, False,
+                        "GitHub returned a different README path", readme_path,
+                    )
+                content = base64.b64decode(payload["content"]).decode("utf-8")
+                return RepositoryReadme(
+                    repo_name=repo_name,
+                    repo_path=repo_url,
+                    readme_path=readme_path,
+                    content=content,
+                    content_hash=self._compute_hash(content),
+                    last_read=datetime.now().isoformat(),
+                    is_local=False,
+                )
+            except Exception as exc:
+                return self._error_readme(
+                    repo_name, repo_url, False,
+                    f"Failed to fetch README {readme_path}: {exc}", readme_path,
+                )
+
+        # Use GitHub API for the repository root README.
+        url = f"https://api.github.com/repos/{owner}/{repo}/readme"
 
         try:
             response = requests.get(url, headers=headers, timeout=30)
@@ -557,7 +676,12 @@ class RepositoryReadmeReader:
                 error=f"Failed to fetch README: {e}",
             )
 
-    def get_readme(self, repo_name: str, force_refresh: bool = False) -> Optional[RepositoryReadme]:
+    def get_readme(
+        self,
+        repo_name: str,
+        force_refresh: bool = False,
+        readme_path: Optional[str] = None,
+    ) -> Optional[RepositoryReadme]:
         """Get README for a specific repository.
 
         Args:
@@ -571,7 +695,7 @@ class RepositoryReadmeReader:
             return None
 
         location = self.registry.repositories[repo_name]
-        return self._read_repo_readme(repo_name, location, force_refresh)
+        return self._read_repo_readme(repo_name, location, force_refresh, readme_path)
 
     def get_all_readmes(self) -> Dict[str, str]:
         """Get all discovered READMEs as a dictionary.
@@ -581,12 +705,12 @@ class RepositoryReadmeReader:
         """
         readmes = self.discover_readmes()
         return {
-            readme.repo_name: readme.content
+            f"{readme.repo_name}:{readme.readme_path}": readme.content
             for readme in readmes
             if readme.content and not readme.error
         }
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self, include_previews: bool = True) -> Dict[str, Any]:
         """Get summary of all discovered READMEs.
 
         Returns:
@@ -594,31 +718,41 @@ class RepositoryReadmeReader:
         """
         readmes = self.discover_readmes()
 
+        successful_repos = {
+            readme.repo_name for readme in readmes if not readme.error
+        }
+        failed_repos = set(self.registry.repositories) - successful_repos
         summary = {
             "timestamp": datetime.now().isoformat(),
             "total_repos": len(self.registry.repositories),
-            "successful": 0,
-            "failed": 0,
+            "total_readmes": len(readmes),
+            "successful": len(successful_repos),
+            "failed": len(failed_repos),
+            "successful_readmes": sum(1 for readme in readmes if not readme.error),
+            "failed_readmes": sum(1 for readme in readmes if readme.error),
             "readmes": [],
         }
 
         for readme in readmes:
             if readme.error:
-                summary["failed"] += 1
                 summary["readmes"].append({
                     "repo": readme.repo_name,
                     "status": "error",
                     "error": readme.error,
                 })
             else:
-                summary["successful"] += 1
-                summary["readmes"].append({
+                entry = {
                     "repo": readme.repo_name,
                     "status": "ok",
                     "path": readme.repo_path,
                     "readme_file": readme.readme_path,
                     "size": len(readme.content),
-                    "preview": readme.content[:500] + "..." if len(readme.content) > 500 else readme.content,
-                })
+                }
+                if include_previews:
+                    entry["preview"] = (
+                        readme.content[:500] + "..."
+                        if len(readme.content) > 500 else readme.content
+                    )
+                summary["readmes"].append(entry)
 
         return summary

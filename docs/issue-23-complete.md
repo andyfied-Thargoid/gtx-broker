@@ -100,7 +100,8 @@ The tools are automatically available to agents via the broker configuration. Ke
 - `write_broker_note(note_path, content)` - Write only to broker directory
 - `search_vault(query, extension)` - Search vault
 - `discover_repository_readmes()` - Discover all READMEs
-- `read_repository_readme(repo_name, refresh)` - Read specific repo README
+- `read_repository_readme(repo_name, readme_path?, refresh?)` - Read the root or an exact discovered README
+- `get_repository_summary(include_previews)` - Summarize repositories and all discovered README entries
 
 ## Security Boundaries
 

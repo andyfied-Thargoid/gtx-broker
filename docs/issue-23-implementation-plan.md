@@ -65,8 +65,9 @@ The GTX broker should be able to use documentation as context: read README files
 
 ### Phase 4: Hermes Tool Integration
 1. Create custom Hermes tools:
-   - `read_repository_readme(repo_name)` - Read README from specific repo
+   - `read_repository_readme(repo_name, readme_path)` - Read the root or an exact discovered README path
    - `discover_repository_readmes()` - List all accessible READMEs
+   - `get_repository_summary(include_previews)` - Summarize repository and README counts
    - `read_vault_note(note_path)` - Read note from vault
    - `search_vault(query)` - Search vault for relevant notes
    - `write_broker_note(content, filename)` - Write to broker directory only

@@ -461,3 +461,15 @@ def test_empty_readme_path_does_not_reuse_cached_root_readme(tmp_path):
 
     assert root.content == "root"
     assert invalid.error == "Invalid README path: "
+
+
+def test_get_all_readmes_includes_successful_empty_readme(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "README.md").write_text("")
+
+    readmes = RepositoryReadmeReader(
+        RepositoryRegistry({"repo": str(repository)})
+    ).get_all_readmes()
+
+    assert readmes == {"repo:README.md": ""}

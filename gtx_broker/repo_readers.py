@@ -707,7 +707,7 @@ class RepositoryReadmeReader:
         return {
             f"{readme.repo_name}:{readme.readme_path}": readme.content
             for readme in readmes
-            if readme.content and not readme.error
+            if not readme.error
         }
 
     def get_summary(self, include_previews: bool = True) -> Dict[str, Any]:

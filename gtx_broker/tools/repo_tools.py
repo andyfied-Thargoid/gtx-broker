@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Callable
 import json
+import os
 
 
 @dataclass
@@ -32,13 +33,23 @@ class ToolResult:
 class RepositoryTools:
     """Hermes tools for repository README access."""
     
-    def __init__(self, github_token: Optional[str] = None):
+    def __init__(self, github_token: Optional[str] = None, *, registry_path: Optional[str] = None):
         """Initialize repository tools.
         
         Args:
+            registry_path: JSON registry of configured repositories
             github_token: GitHub token for remote access
         """
+        self.registry_path = registry_path or os.getenv("GTX_BROKER_REPOSITORY_REGISTRY")
         self.github_token = github_token or os.getenv("GITHUB_TOKEN")
+
+    def _registry(self):
+        """Load the configured repository registry for this invocation."""
+        from ..repo_readers import RepositoryRegistry
+
+        if self.registry_path:
+            return RepositoryRegistry.from_file(self.registry_path)
+        return RepositoryRegistry.compute01_defaults()
     
     def get_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for repo access."""
@@ -93,10 +104,10 @@ class RepositoryTools:
     
     def discover_readmes(self) -> ToolResult:
         """Discover all READMEs."""
-        from ..repo_readers import RepositoryRegistry, RepositoryReadmeReader
+        from ..repo_readers import RepositoryReadmeReader
         
         try:
-            registry = RepositoryRegistry.compute01_defaults()
+            registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             readmes = reader.discover_readmes()
             
@@ -125,10 +136,10 @@ class RepositoryTools:
     
     def read_readme(self, repo_name: str, refresh: bool = False) -> ToolResult:
         """Read README from specific repo."""
-        from ..repo_readers import RepositoryRegistry, RepositoryReadmeReader
+        from ..repo_readers import RepositoryReadmeReader
         
         try:
-            registry = RepositoryRegistry.compute01_defaults()
+            registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             readme = reader.get_readme(repo_name, force_refresh=refresh)
             
@@ -157,10 +168,10 @@ class RepositoryTools:
     
     def get_summary(self, include_previews: bool = True) -> ToolResult:
         """Get repository summary."""
-        from ..repo_readers import RepositoryRegistry, RepositoryReadmeReader
+        from ..repo_readers import RepositoryReadmeReader
         
         try:
-            registry = RepositoryRegistry.compute01_defaults()
+            registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             summary = reader.get_summary()
             
@@ -173,7 +184,3 @@ class RepositoryTools:
                 success=False,
                 error=f"Summary error: {e}",
             )
-
-
-# Import os at module level
-import os

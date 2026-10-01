@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -87,6 +89,47 @@ def test_vault_reader():
         
         print("\nAll vault tests passed!")
 
+
+def test_write_directory_traversal_is_rejected_before_creation(tmp_path):
+    """A traversal write directory must not create a path outside the vault."""
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    outside_path = tmp_path / "outside"
+
+    with pytest.raises(ValueError, match="resolves outside vault"):
+        ObsidianVault(str(vault_path), "../outside")
+
+    assert not outside_path.exists()
+
+
+def test_symlinked_write_directory_is_rejected_before_creation(tmp_path):
+    """A write directory through an external symlink must fail closed."""
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    outside_path = tmp_path / "outside"
+    outside_path.mkdir()
+    (vault_path / "linked").symlink_to(outside_path, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="resolves outside vault"):
+        ObsidianVault(str(vault_path), "linked/broker")
+    assert not (outside_path / "broker").exists()
+
+
+def test_empty_write_directory_is_rejected(tmp_path):
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    with pytest.raises(ValueError, match="write directory"):
+        ObsidianVault(str(vault_path), "")
+
+
+def test_search_glob_cannot_escape_vault(tmp_path):
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    (tmp_path / "outside.md").write_text("outside")
+    vault = ObsidianVault(str(vault_path))
+
+    assert vault.search_vault("../*") == []
 
 if __name__ == "__main__":
     test_vault_reader()

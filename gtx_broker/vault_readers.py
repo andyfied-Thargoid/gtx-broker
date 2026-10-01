@@ -14,9 +14,12 @@ Security boundaries:
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import json
 import logging
 import os
+import stat
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,26 +74,82 @@ class ObsidianVaultReader:
             vault_path: Absolute path to Obsidian vault root
             write_dir: Relative path within vault for broker writes (e.g., "AI/GTX-Broker")
         """
-        self.vault_root = Path(vault_path).resolve(strict=False)
+        # Resolve vault root first (before any filesystem writes)
+        vault_root = Path(vault_path).resolve(strict=False)
+        self.vault_root = vault_root
         self.write_dir = write_dir  # Keep as relative
+        write_dir_path = Path(write_dir)
+        if not write_dir.strip() or write_dir_path in {Path("."), Path("")}:
+            raise ValueError("broker write directory must be non-empty")
+        self.write_dir_parts = tuple(
+            part for part in write_dir_path.parts if part not in {"", "."}
+        )
         
-        # Validate vault exists
-        if not self.vault_root.exists():
+        # Validate vault exists BEFORE any filesystem writes
+        if not vault_root.exists():
             raise VaultNotFoundError(f"Vault does not exist: {vault_path}")
         
-        # Validate write directory is within vault
+        # Validate write directory is within vault BEFORE creating it
+        # Resolve the write directory path and verify containment FIRST
+        write_dir_resolved = vault_root / write_dir
+        # Resolve to get canonical path (follows symlinks)
+        write_dir_resolved = write_dir_resolved.resolve()
+        # Verify containment BEFORE any mkdir
         try:
-            self.write_dir_resolved = self.vault_root / self.write_dir
-            self.write_dir_resolved.mkdir(parents=True, exist_ok=True)
-            # Verify write dir is actually under vault root
-            self.write_dir_resolved.relative_to(self.vault_root)
-        except ValueError as e:
+            write_dir_resolved.relative_to(vault_root)
+        except ValueError:
             raise ValueError(
-                f"Write directory {write_dir} is not within vault {vault_path}: {e}"
+                f"Write directory {write_dir} resolves outside vault: {write_dir_resolved}"
             )
+        # Only now create the directory, without following symlinked components.
+        directory_fd = self._open_directory_chain(self.write_dir_parts, create=True)
+        os.close(directory_fd)
+        self.write_dir_resolved = write_dir_resolved
         
         logger.info("Initialized ObsidianVaultReader for %s (write dir: %s)",
                    vault_path, self.write_dir)
+
+    def _open_directory_chain(self, parts: tuple[str, ...], *, create: bool) -> int:
+        """Open a vault-relative directory without following symlinks."""
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(self.vault_root), flags | nofollow)
+        try:
+            for part in parts:
+                if part in {"", ".", ".."}:
+                    raise VaultSecurityError(f"Unsafe vault path component: {part!r}")
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o770, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(part, flags | nofollow, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _open_relative_file(self, path: str) -> tuple[int, tuple[str, ...]]:
+        """Open a vault-relative regular file without following symlinks."""
+        path_parts = Path(path).parts
+        if (
+            Path(path).is_absolute()
+            or any(part in {"", ".", ".."} for part in path_parts)
+            or not path_parts
+        ):
+            raise VaultSecurityError(f"Unsafe vault file path: {path}")
+        parent_fd = self._open_directory_chain(path_parts[:-1], create=False)
+        try:
+            file_fd = os.open(
+                path_parts[-1],
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        return file_fd, path_parts
     
     def _canonicalize_path(self, path: str) -> Path:
         """Canonicalize path and verify it's within vault.
@@ -180,15 +239,10 @@ class ObsidianVaultReader:
             # Check for symlink escape
             self._validate_no_symlink_escape(abs_path)
             
-            # Check file exists and is not a directory
-            if not abs_path.exists():
-                return VaultOperationResult(
-                    success=False,
-                    path=self._get_relative_path(abs_path),
-                    error=f"File not found: {path}"
-                )
-            
-            if abs_path.is_dir():
+            file_fd, _path_parts = self._open_relative_file(path)
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                os.close(file_fd)
                 return VaultOperationResult(
                     success=False,
                     path=self._get_relative_path(abs_path),
@@ -196,16 +250,19 @@ class ObsidianVaultReader:
                 )
             
             # Check file size (limit to 1MB for safety)
-            file_size = abs_path.stat().st_size
+            file_size = file_stat.st_size
             if file_size > 1024 * 1024:
+                os.close(file_fd)
                 return VaultOperationResult(
                     success=False,
                     path=self._get_relative_path(abs_path),
                     error=f"File too large: {file_size} bytes (max 1MB)"
                 )
             
-            # Read content
-            content = abs_path.read_text(encoding='utf-8')
+            try:
+                content = os.read(file_fd, file_size + 1).decode("utf-8")
+            finally:
+                os.close(file_fd)
             
             return VaultOperationResult(
                 success=True,
@@ -239,26 +296,33 @@ class ObsidianVaultReader:
         try:
             abs_path = self._canonicalize_path(path)
             
-            if not abs_path.exists() or abs_path.is_dir():
+            file_fd, _path_parts = self._open_relative_file(path)
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                os.close(file_fd)
                 return None
-            
-            # Get relative path
+
             rel_path = self._get_relative_path(abs_path)
             
             # Check if markdown
             is_markdown = abs_path.suffix.lower() in {'.md', '.markdown', '.mdown'}
             
             # Calculate content hash
-            content_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
-            
-            # Get modification time
-            mtime = abs_path.stat().st_mtime
+            digest = hashlib.sha256()
+            try:
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+            finally:
+                os.close(file_fd)
+            content_hash = digest.hexdigest()
+
+            mtime = file_stat.st_mtime
             modified_at = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
             
             return VaultFileMetadata(
                 path=str(abs_path),
                 relative_path=rel_path,
-                size_bytes=abs_path.stat().st_size,
+                size_bytes=file_stat.st_size,
                 modified_at=modified_at,
                 is_markdown=is_markdown,
                 content_hash=content_hash,
@@ -276,29 +340,38 @@ class ObsidianVaultReader:
         Returns:
             List of relative paths to files and directories
         """
+        directory_fd = None
         try:
-            abs_path = self._canonicalize_path(path)
-            
-            if not abs_path.exists() or not abs_path.is_dir():
+            path_parts = Path(path).parts
+            if Path(path).is_absolute() or ".." in path_parts:
                 return []
-            
-            # Reject symlinks to directories
-            if abs_path.is_symlink():
-                return []
-            
+            directory_fd = self._open_directory_chain(path_parts, create=False)
             entries = []
-            for item in abs_path.iterdir():
-                # Skip symlinks
-                if item.is_symlink():
-                    continue
-                
-                rel_path = self._get_relative_path(item)
-                entries.append(rel_path)
-            
+            for name in os.listdir(directory_fd):
+                try:
+                    child_fd = os.open(
+                        name,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=directory_fd,
+                    )
+                except OSError:
+                    try:
+                        file_fd = os.open(
+                            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd
+                        )
+                        os.close(file_fd)
+                    except OSError:
+                        continue
+                else:
+                    os.close(child_fd)
+                entries.append(str(Path(*path_parts, name)))
             return sorted(entries)
-            
         except Exception:
             return []
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
     
     def search_files(self, pattern: str, extension: Optional[str] = None) -> List[str]:
         """Search for files matching a pattern.
@@ -310,25 +383,53 @@ class ObsidianVaultReader:
         Returns:
             List of matching relative paths
         """
+        root_fd = None
         try:
-            # Search from vault root
-            search_path = self.vault_root / pattern
-            
+            pattern_path = Path(pattern)
+            if pattern_path.is_absolute() or ".." in pattern_path.parts:
+                return []
             results = []
-            for file_path in search_path.parent.rglob(pattern):
-                if file_path.is_symlink():
-                    continue
-                
-                # Check extension if specified
-                if extension and file_path.suffix.lower() != extension:
-                    continue
-                
-                results.append(self._get_relative_path(file_path))
-            
+            root_fd = self._open_directory_chain((), create=False)
+
+            def walk(directory_fd: int, prefix: tuple[str, ...]) -> None:
+                for name in os.listdir(directory_fd):
+                    try:
+                        child_fd = os.open(
+                            name,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            dir_fd=directory_fd,
+                        )
+                    except OSError:
+                        try:
+                            file_fd = os.open(
+                                name,
+                                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                                dir_fd=directory_fd,
+                            )
+                            file_stat = os.fstat(file_fd)
+                            os.close(file_fd)
+                        except OSError:
+                            continue
+                        relative = str(Path(*prefix, name))
+                        if stat.S_ISREG(file_stat.st_mode) and (
+                            fnmatch.fnmatch(relative, pattern)
+                            or fnmatch.fnmatch(name, pattern)
+                        ) and (not extension or Path(name).suffix.lower() == extension):
+                            results.append(relative)
+                    else:
+                        try:
+                            walk(child_fd, (*prefix, name))
+                        finally:
+                            os.close(child_fd)
+
+            walk(root_fd, ())
             return sorted(results)
-            
         except Exception:
             return []
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
     
     def write_file(self, path: str, content: str, encoding: str = "utf-8") -> VaultOperationResult:
         """Write content to broker's dedicated directory.
@@ -358,15 +459,37 @@ class ObsidianVaultReader:
             # Check for symlink escape
             self._validate_no_symlink_escape(abs_path)
             
-            # Ensure parent directory exists
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Atomic write: write to temp file, then rename
-            temp_file = abs_path.with_suffix(f".{abs_path.suffix}.tmp")
-            temp_file.write_text(content, encoding=encoding)
-            
-            # Atomic rename
-            temp_file.rename(abs_path)
+            path_parts = Path(path).parts
+            if (
+                Path(path).is_absolute()
+                or any(part in {"", ".", ".."} for part in path_parts)
+                or tuple(path_parts[:len(self.write_dir_parts)]) != self.write_dir_parts
+                or len(path_parts) <= len(self.write_dir_parts)
+            ):
+                raise VaultSecurityError(f"Path {path} is outside broker write directory")
+
+            parent_fd = self._open_directory_chain(path_parts[:-1], create=True)
+            try:
+                filename = path_parts[-1]
+                temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+                temporary_fd = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o660,
+                    dir_fd=parent_fd,
+                )
+                with os.fdopen(temporary_fd, "w", encoding=encoding) as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(
+                    temporary_name,
+                    filename,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+            finally:
+                os.close(parent_fd)
             
             return VaultOperationResult(
                 success=True,

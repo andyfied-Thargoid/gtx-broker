@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import base64
+import stat
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +41,24 @@ class RepositoryRegistry:
     repositories: Dict[str, str] = field(default_factory=dict)  # name -> path or URL
     github_token: Optional[str] = None
     last_updated: Optional[str] = None
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "RepositoryRegistry":
+        """Load repository mappings from a JSON registry file."""
+        registry_path = Path(path)
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+        repositories = data.get("repositories", data) if isinstance(data, dict) else None
+        if not isinstance(repositories, dict):
+            raise ValueError("repository registry must contain an object of repositories")
+
+        validated: Dict[str, str] = {}
+        for name, location in repositories.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("repository names must be non-empty strings")
+            if not isinstance(location, str) or not location.strip():
+                raise ValueError(f"repository location for {name!r} must be a non-empty string")
+            validated[name] = location
+        return cls(validated, last_updated=datetime.now().isoformat())
     
     @classmethod
     def compute01_defaults(cls, source_root: str = "/home/andyfied/src") -> "RepositoryRegistry":
@@ -84,7 +105,7 @@ class RepositoryReadmeReader:
         
         for repo_name, repo_location in self.registry.repositories.items():
             readme = self._read_repo_readme(repo_name, repo_location, refresh_cache)
-            if readme and not readme.error:
+            if readme:
                 readmes.append(readme)
         
         return readmes
@@ -105,28 +126,23 @@ class RepositoryReadmeReader:
         cache_key = f"{repo_name}:{repo_location}"
         if cache_key in self._cache and not force_refresh:
             cached = self._cache[cache_key]
-            if cached.error:
-                return None
-            # Check cache freshness (24 hours)
-            if cache_key in self._cache_timestamps:
-                age = datetime.now() - self._cache_timestamps[cache_key]
-                if age.total_seconds() < 86400:
-                    return cached
+            timestamp = self._cache_timestamps.get(cache_key)
+            if timestamp and (datetime.now() - timestamp).total_seconds() < 86400:
+                return cached
         
         # Determine if local or remote
-        is_local = repo_location.startswith('/') or (
-            '/' in repo_location and not repo_location.startswith('http')
-        )
+        is_remote = repo_location.startswith(("http://", "https://", "git@", "ssh://"))
+        is_local = not is_remote
         
         try:
             if is_local:
-                return self._read_local_readme(repo_name, repo_location)
+                readme = self._read_local_readme(repo_name, repo_location)
             else:
-                return self._read_remote_readme(repo_name, repo_location)
+                readme = self._read_remote_readme(repo_name, repo_location)
                 
         except Exception as e:
             logger.warning(f"Failed to read README for {repo_name}: {e}")
-            return RepositoryReadme(
+            readme = RepositoryReadme(
                 repo_name=repo_name,
                 repo_path=repo_location,
                 readme_path="",
@@ -136,6 +152,10 @@ class RepositoryReadmeReader:
                 is_local=is_local,
                 error=str(e),
             )
+
+        self._cache[cache_key] = readme
+        self._cache_timestamps[cache_key] = datetime.now()
+        return readme
     
     def _read_local_readme(self, repo_name: str, repo_path: str) -> RepositoryReadme:
         """Read README from local repository.
@@ -173,7 +193,7 @@ class RepositoryReadmeReader:
             readme_file = path / name
             if readme_file.exists() and readme_file.is_file():
                 try:
-                    content = readme_file.read_text(encoding='utf-8')
+                    content = self._read_local_file_no_follow(path, name)
                     return RepositoryReadme(
                         repo_name=repo_name,
                         repo_path=repo_path,
@@ -183,7 +203,20 @@ class RepositoryReadmeReader:
                         last_read=datetime.now().isoformat(),
                         is_local=True,
                     )
-                except Exception as e:
+                except OSError as exc:
+                    if exc.errno in {40, 20}:
+                        return RepositoryReadme(
+                            repo_name=repo_name,
+                            repo_path=repo_path,
+                            readme_path=name,
+                            content="",
+                            content_hash="",
+                            last_read=datetime.now().isoformat(),
+                            is_local=True,
+                            error="README resolves through a symlink",
+                        )
+                    continue
+                except Exception:
                     continue
         
         return RepositoryReadme(
@@ -196,6 +229,46 @@ class RepositoryReadmeReader:
             is_local=True,
             error="No README file found",
         )
+
+    @staticmethod
+    def _read_local_file_no_follow(repository: Path, name: str) -> str:
+        """Read a repository child through descriptors without symlink follows."""
+        root_fd = RepositoryReadmeReader._open_directory_no_follow(repository)
+        try:
+            file_fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+        try:
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise OSError(20, "Not a regular file")
+            chunks = []
+            while chunk := os.read(file_fd, 1024 * 1024):
+                chunks.append(chunk)
+            return b"".join(chunks).decode("utf-8")
+        finally:
+            os.close(file_fd)
+
+    @staticmethod
+    def _open_directory_no_follow(path: Path) -> int:
+        """Open an absolute or relative directory without symlink follows."""
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        parts = list(path.parts)
+        if path.is_absolute():
+            fd = os.open(path.anchor or "/", directory_flags | nofollow)
+            parts = [part for part in parts if part not in {path.anchor, ""}]
+        else:
+            fd = os.open(".", directory_flags | nofollow)
+        try:
+            for part in parts:
+                next_fd = os.open(part, directory_flags | nofollow, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except Exception:
+            os.close(fd)
+            raise
     
     def _read_remote_readme(self, repo_name: str, repo_url: str) -> RepositoryReadme:
         """Read README from remote GitHub repository via API.
@@ -221,18 +294,16 @@ class RepositoryReadmeReader:
         
         # Parse repo from URL
         try:
-            # Handle both https and SSH URLs
-            if repo_url.startswith('git@'):
+            if repo_url.startswith("git@"):
                 # SSH format: git@github.com:user/repo.git
-                path = repo_url.split(':')[1].replace('.git', '')
-            elif repo_url.endswith('.git'):
-                # HTTPS with .git suffix
-                path = repo_url.split('/')[-1].replace('.git', '')
+                path = repo_url.split(":", 1)[1]
             else:
-                # Direct path
-                path = repo_url.split('/')[-1]
-            
-            owner, repo = path.split('/')
+                parsed = urlparse(repo_url)
+                path = parsed.path if parsed.scheme and parsed.netloc else repo_url
+            path = path.strip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            owner, repo = path.split("/", 1)
             
         except Exception as e:
             return RepositoryReadme(
@@ -280,8 +351,6 @@ class RepositoryReadmeReader:
                     error=f"GitHub API error: {response.status_code}",
                 )
             
-            # Decode base64 content
-            import base64
             content = base64.b64decode(response.json()['content']).decode('utf-8')
             
             return RepositoryReadme(

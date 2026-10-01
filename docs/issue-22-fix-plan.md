@@ -1,43 +1,51 @@
-# Fix Misleading Image-Submission Reply
+# PR #2 broker-only fix plan
 
-## Issue
-When an image is sent to the broker, the immediate reply gives incorrect or misleading information rather than accurately reporting that the image has been accepted for later identification by the P40 image worker.
+## Scope
 
-## Problem Analysis
-Current flow in `telegram_chat_bot.py` (lines 2117-2136):
-- `route_to_vision_if_available()` is a stub that doesn't actually queue images
-- Returns `None` and logs "Vision routing requested but issue #40 is not implemented"
-- User gets no feedback about their image being queued
+PR #2 is limited to broker-owned Hermes tools, vault access, repository README
+discovery, packaging, and documentation. Scheduler/orchestration and image-task
+lifecycle work are excluded: Paperclip is the authoritative task scheduler.
 
-Expected behavior:
-1. After successful submission, reply with: "Image received and queued for identification [job_id: xxx]"
-2. If queueing fails, return explicit failure message
-3. Deliver actual identification result separately when P40 worker finishes
+The Telegram/Teapot/GTX route remains outside this repository:
+`Telegram → I'm a Little Teapot → Hermes–Teapot → GTX`.
 
-## Implementation Plan
+## Prioritized work items
 
-### Phase 1: Update attachment_pipeline.py
-- Modify `route_to_broker()` to actually submit the job to the gtx-broker HTTP API
-- Return job_id and status on success/failure
-- Add proper error handling
+### P0 — Hermes tools and packaging
 
-### Phase 2: Update telegram_chat_bot.py
-- Modify `route_to_vision_if_available()` to call the updated broker routing
-- Send immediate "queued" reply with job_id when submission succeeds
-- Return `None` only on actual failure (not on success while awaiting processing)
+This is the first priority because broken imports, omitted packages, or missing
+runtime dependencies make the broker tools unusable after installation.
 
-### Phase 3: Add result delivery mechanism
-- Create polling endpoint or webhook for result retrieval
-- Update bot to periodically check for completed job results
-- Send final identification result when available
+- Correct public tool imports and handlers.
+- Include `gtx_broker.tools` in the wheel.
+- Declare runtime dependencies used by repository readers.
+- Exercise the public tool handlers and verify an installed-wheel import.
 
-## Files to Change
-1. `~/src/telegram-chat-bot/attachment_pipeline.py` - Add broker API integration
-2. `~/src/telegram-chat-bot/telegram_chat_bot.py` - Fix reply logic
-3. Create test cases for queued status reporting
+### P0 — Vault boundary
 
-## Acceptance Criteria
-- [ ] Image submission returns "queued" status with job_id
-- [ ] Failed queueing returns explicit error message
-- [ ] Actual result delivered separately after processing
-- [ ] Tests cover success, queue failure, delayed completion, failed identification
+This is the first security priority because a write-boundary failure can create
+or modify files outside the configured vault.
+
+- Resolve and validate canonical write destinations before any filesystem write.
+- Reject traversal and symlinked write paths without creating directories outside
+the vault.
+- Keep read and write operations within the configured vault boundary.
+
+### P1 — Repository discovery
+
+Implement this after the installability and filesystem safety gates are green.
+It is the main functional scope of the README-discovery change.
+
+- Load repository mappings from an explicit JSON registry when configured.
+- Support multiple configured local and remote repositories.
+- Return per-repository success or failure rather than silently dropping errors.
+- Keep local README reads within the configured repository boundary.
+
+## Acceptance criteria
+
+- Hermes tools import from source and from an installed wheel.
+- The wheel includes `gtx_broker.tools` and declares all runtime dependencies.
+- Vault traversal and symlink boundary tests pass.
+- Configured multi-repository discovery and remote URL parsing tests pass.
+- No scheduler, Paperclip, Telegram presentation, or Teapot/GTX implementation is
+added to this broker PR.

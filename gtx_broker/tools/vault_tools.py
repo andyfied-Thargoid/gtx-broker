@@ -32,17 +32,17 @@ class ToolResult:
 
 class VaultTools:
     """Hermes tools for Obsidian vault access."""
-    
+
     def __init__(self, vault_path: str, write_dir: str = "AI/GTX-Broker"):
         """Initialize vault tools.
-        
+
         Args:
             vault_path: Path to Obsidian vault
             write_dir: Broker write directory within vault
         """
         self.vault_path = vault_path
         self.write_dir = write_dir
-    
+
     def get_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for vault access."""
         return [
@@ -123,22 +123,22 @@ class VaultTools:
                 handler=self.write_note,
             ),
         ]
-    
+
     def read_note(self, note_path: str) -> ToolResult:
         """Read a vault note.
-        
+
         Args:
             note_path: Path to note relative to vault root
-            
+
         Returns:
             ToolResult with content or error
         """
         from gtx_broker.vault_readers import ObsidianVault, VaultOperationResult
-        
+
         try:
             vault = ObsidianVault(self.vault_path, self.write_dir)
             result: VaultOperationResult = vault.read_note(note_path)
-            
+
             if result.success:
                 return ToolResult(
                     success=True,
@@ -158,23 +158,23 @@ class VaultTools:
                 success=False,
                 error=f"Read error: {e}",
             )
-    
+
     def search_vault(self, query: str, extension: str = ".md") -> ToolResult:
         """Search vault for files.
-        
+
         Args:
             query: Search pattern
             extension: File extension filter
-            
+
         Returns:
             ToolResult with list of paths
         """
         from gtx_broker.vault_readers import ObsidianVault
-        
+
         try:
             vault = ObsidianVault(self.vault_path, self.write_dir)
             results = vault.search_vault(query, extension)
-            
+
             return ToolResult(
                 success=True,
                 content=json.dumps(results, indent=2),
@@ -184,27 +184,32 @@ class VaultTools:
                     "extension": extension,
                 },
             )
+        except PermissionError as e:
+            return ToolResult(
+                success=False,
+                error=f"Permission denied searching vault: {e}",
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
                 error=f"Search error: {e}",
             )
-    
+
     def list_directory(self, directory: str = "") -> ToolResult:
         """List directory contents.
-        
+
         Args:
             directory: Directory path relative to vault root
-            
+
         Returns:
             ToolResult with list of paths
         """
         from gtx_broker.vault_readers import ObsidianVault
-        
+
         try:
             vault = ObsidianVault(self.vault_path, self.write_dir)
             entries = vault.list_directory(directory)
-            
+
             return ToolResult(
                 success=True,
                 content=json.dumps(entries, indent=2),
@@ -213,28 +218,33 @@ class VaultTools:
                     "directory": directory,
                 },
             )
+        except PermissionError as e:
+            return ToolResult(
+                success=False,
+                error=f"Permission denied listing vault directory: {e}",
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
                 error=f"List error: {e}",
             )
-    
+
     def write_note(self, note_path: str, content: str) -> ToolResult:
         """Write note to broker directory.
-        
+
         Args:
             note_path: Path within broker directory
             content: Content to write
-            
+
         Returns:
             ToolResult indicating success or failure
         """
         from gtx_broker.vault_readers import ObsidianVault, VaultOperationResult
-        
+
         try:
             vault = ObsidianVault(self.vault_path, self.write_dir)
             result: VaultOperationResult = vault.write_note(note_path, content)
-            
+
             if result.success:
                 return ToolResult(
                     success=True,

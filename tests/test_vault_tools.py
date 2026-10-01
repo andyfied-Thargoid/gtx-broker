@@ -21,47 +21,47 @@ def test_vault_reader():
     with tempfile.TemporaryDirectory() as tmpdir:
         vault_path = Path(tmpdir) / "vault"
         vault_path.mkdir()
-        
+
         # Create test notes
         (vault_path / "test.md").write_text("Test content")
         (vault_path / "notes").mkdir()
         (vault_path / "notes" / "nested.md").write_text("Nested content")
-        
+
         # Create broker directory
         broker_dir = vault_path / "AI" / "GTX-Broker"
         broker_dir.mkdir(parents=True)
-        
+
         # Initialize vault
         vault = ObsidianVault(str(vault_path), "AI/GTX-Broker")
-        
+
         # Test read
         result = vault.read_note("test.md")
         assert result.success, f"Failed to read: {result.error}"
         assert result.content == "Test content"
         print("✓ Read note: PASS")
-        
+
         # Test nested read
         result = vault.read_note("notes/nested.md")
         assert result.success, f"Failed to read nested: {result.error}"
         assert result.content == "Nested content"
         print("✓ Read nested note: PASS")
-        
+
         # Test write to broker directory
         result = vault.write_note("AI/GTX-Broker/test.md", "Wrote content")
         assert result.success, f"Failed to write: {result.error}"
         print("✓ Write to broker dir: PASS")
-        
+
         # Verify write
         result = vault.read_note("AI/GTX-Broker/test.md")
         assert result.success
         assert result.content == "Wrote content"
         print("✓ Verify write: PASS")
-        
+
         # Test search
         results = vault.search_vault("*.md")
         assert len(results) >= 3, f"Expected 3+ .md files, got {len(results)}"
         print("✓ Search vault: PASS")
-        
+
         # Test path escape prevention (absolute path outside vault)
         print("Testing absolute path escape...")
         result = vault.read_note("/etc/passwd")
@@ -73,7 +73,7 @@ def test_vault_reader():
         else:
             print(f"ERROR: Got unexpected error: {result.error}")
             assert False, f"Expected 'Absolute paths are not allowed' but got: {result.error}"
-        
+
         # Test symlink escape prevention
         symlink_path = vault_path / "escape.md"
         symlink_path.symlink_to("/etc/passwd")
@@ -86,7 +86,7 @@ def test_vault_reader():
         else:
             print(f"ERROR: Got unexpected error: {result.error}")
             assert False, f"Expected 'outside vault' in error but got: {result.error}"
-        
+
         print("\nAll vault tests passed!")
 
 

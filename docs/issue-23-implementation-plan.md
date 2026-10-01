@@ -94,11 +94,11 @@ The GTX broker should be able to use documentation as context: read README files
 
 ## Acceptance Criteria
 
-✅ Broker can retrieve README content across every repo accessible through its configured account/checkouts and use it as reference context  
-✅ Broker can search and read notes anywhere inside the configured vault without modifying them  
-✅ Broker can create and update a Markdown document in its dedicated vault section and report the saved path  
-✅ Attempts to edit, delete, rename or write elsewhere in the vault or outside the configured write directory fail at the tool/filesystem layer, including traversal and symlink escape attempts  
-✅ Tests cover multi-repository README discovery, full-vault read/search, successful scoped writes, path escape attempts, and permission/unavailable-source errors  
+✅ Broker can retrieve README content across every repo accessible through its configured account/checkouts and use it as reference context
+✅ Broker can search and read notes anywhere inside the configured vault without modifying them
+✅ Broker can create and update a Markdown document in its dedicated vault section and report the saved path
+✅ Attempts to edit, delete, rename or write elsewhere in the vault or outside the configured write directory fail at the tool/filesystem layer, including traversal and symlink escape attempts
+✅ Tests cover multi-repository README discovery, full-vault read/search, successful scoped writes, path escape attempts, and permission/unavailable-source errors
 
 ## Security Considerations
 

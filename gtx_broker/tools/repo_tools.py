@@ -32,10 +32,10 @@ class ToolResult:
 
 class RepositoryTools:
     """Hermes tools for repository README access."""
-    
+
     def __init__(self, github_token: Optional[str] = None, *, registry_path: Optional[str] = None):
         """Initialize repository tools.
-        
+
         Args:
             registry_path: JSON registry of configured repositories
             github_token: GitHub token for remote access
@@ -49,8 +49,9 @@ class RepositoryTools:
 
         if self.registry_path:
             return RepositoryRegistry.from_file(self.registry_path)
-        return RepositoryRegistry.compute01_defaults()
-    
+        source_root = os.getenv("GTX_BROKER_SOURCE_ROOT", "/home/andyfied/src")
+        return RepositoryRegistry.discover(source_root, self.github_token)
+
     def get_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for repo access."""
         return [
@@ -101,16 +102,16 @@ class RepositoryTools:
                 handler=self.get_summary,
             ),
         ]
-    
+
     def discover_readmes(self) -> ToolResult:
         """Discover all READMEs."""
         from ..repo_readers import RepositoryReadmeReader
-        
+
         try:
             registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             readmes = reader.discover_readmes()
-            
+
             data = [
                 {
                     "repo": r.repo_name,
@@ -122,10 +123,15 @@ class RepositoryTools:
                 }
                 for r in readmes
             ]
-            
+            permission_errors = [
+                item["error"] for item in data
+                if item["error"] and "permission" in item["error"].lower()
+            ]
+
             return ToolResult(
-                success=True,
+                success=not permission_errors,
                 content=json.dumps(data, indent=2),
+                error=("; ".join(permission_errors) if permission_errors else None),
                 metadata={"count": len(data)},
             )
         except Exception as e:
@@ -133,16 +139,16 @@ class RepositoryTools:
                 success=False,
                 error=f"Discovery error: {e}",
             )
-    
+
     def read_readme(self, repo_name: str, refresh: bool = False) -> ToolResult:
         """Read README from specific repo."""
         from ..repo_readers import RepositoryReadmeReader
-        
+
         try:
             registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             readme = reader.get_readme(repo_name, force_refresh=refresh)
-            
+
             if readme and readme.content and not readme.error:
                 return ToolResult(
                     success=True,
@@ -165,16 +171,16 @@ class RepositoryTools:
                 success=False,
                 error=f"Read error: {e}",
             )
-    
+
     def get_summary(self, include_previews: bool = True) -> ToolResult:
         """Get repository summary."""
         from ..repo_readers import RepositoryReadmeReader
-        
+
         try:
             registry = self._registry()
             reader = RepositoryReadmeReader(registry, self.github_token)
             summary = reader.get_summary()
-            
+
             return ToolResult(
                 success=True,
                 content=json.dumps(summary, indent=2),
